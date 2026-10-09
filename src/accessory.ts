@@ -1370,6 +1370,18 @@ export class KumoThermostatAccessory {
   async setActive(value: CharacteristicValue): Promise<void> {
     const on = value === this.platform.Characteristic.Active.ACTIVE;
 
+    // ON for a unit that is already running changes nothing, so nothing is sent.
+    // A scene that switches mode pushes Active=ON alongside TargetHeaterCoolerState,
+    // concurrently and in either order. Re-sending the remembered mode here raced
+    // the scene's own mode write and whichever reached the cloud last won: a morning
+    // HEAT scene left units in the COOL the evening scene had set. An off IN FLIGHT
+    // still lets the ON through, because the cache has not caught up with it yet.
+    if (on && !this.offInFlight() &&
+        this.currentStatus?.power === 1 && this.currentStatus.operationMode !== 'off') {
+      this.platform.log.info(`[ACTIVE] ${this.accessory.displayName}: HomeKit sent ON, already on — nothing to send`);
+      return;
+    }
+
     let operationMode: 'off' | 'heat' | 'cool' | 'auto' | 'dry' | 'vent';
     if (!on) {
       operationMode = 'off';
