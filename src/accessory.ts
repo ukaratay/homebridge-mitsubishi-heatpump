@@ -2539,8 +2539,10 @@ export class KumoThermostatAccessory {
       if (commands.spCool !== undefined) {
         this.currentStatus.spCool = commands.spCool;
       }
-      if (fan) {
-        this.currentStatus.fanSpeed = fan;
+      // Only what was sent: an off mirror carries no fan, and caching the source's
+      // speed here would show a speed the target was never given.
+      if (commands.fanSpeedRaw) {
+        this.currentStatus.fanSpeed = commands.fanSpeedRaw;
       }
 
       this.refreshClimateCharacteristics();
@@ -2554,8 +2556,8 @@ export class KumoThermostatAccessory {
         this.service.updateCharacteristic(
           this.platform.Characteristic.CoolingThresholdTemperature, commands.spCool);
       }
-      if (fan) {
-        this.syncFanCharacteristics(fan);
+      if (commands.fanSpeedRaw) {
+        this.syncFanCharacteristics(commands.fanSpeedRaw);
       }
     }
   }

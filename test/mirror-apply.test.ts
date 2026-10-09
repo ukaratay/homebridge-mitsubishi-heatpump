@@ -79,6 +79,14 @@ test('off mirror sends operationMode:off only (no setpoint, no fan)', async () =
   assert.deepStrictEqual(sendCommandCalls[0].commands, { operationMode: 'off' });
 });
 
+test('an off mirror does not cache the source fan speed it never sent', async () => {
+  const { handler, setProfile } = makeHarness();
+  setProfile(profile());
+  handler.updateFromZone(zone({ operationMode: 'heat', fanSpeed: 'quiet' }));
+  await handler.applyMirror({ operationMode: 'off', power: 0, spHeat: 21, spCool: 24, fanSpeed: 'powerful' });
+  assert.strictEqual(handler['currentStatus']!.fanSpeed, 'quiet');
+});
+
 test('autoHeat normalizes to auto with both setpoints', async () => {
   const { handler, sendCommandCalls, setProfile } = makeHarness();
   setProfile(profile());
