@@ -147,6 +147,21 @@ export class KumoThermostatAccessory {
   // other, with a generation counter so a drag only sends its final value.
   private readonly setpointWriteGen: Map<string, number> = new Map();
   private readonly SETPOINT_HOLD_MS = 1500;
+
+  // A scene that turns on a unit that is OFF and picks its mode pushes Active=ON
+  // and the mode (TargetHeaterCoolerState, or a Dry / Fan-only switch) together,
+  // in either order. The mode write powers the unit on by itself; an ON sent
+  // beside it carries the default or remembered mode and races it through the
+  // cloud, so whichever lands last wins. setActive therefore holds an ON for an
+  // off unit for ACTIVE_ON_HOLD_MS and drops it if a mode write was dispatched
+  // within that span on either side of it. activeWriteGen lets a newer Active
+  // write (an off right behind the on) cancel a held ON. The hold matches
+  // SETPOINT_HOLD_MS, which covers the same scene-burst spread; cloud commands
+  // take seconds to land anyway, so it is not felt.
+  private modeWriteAt = 0;
+  private activeWriteGen = 0;
+  private readonly ACTIVE_ON_HOLD_MS = 1500;
+
   // How long after an accepted setpoint write to re-read the unit and publish what
   // it actually stored. Long enough for the adapter to apply the write and answer
   // a fresh read; short enough that the tile settles while the user is still there.
@@ -651,6 +666,9 @@ export class KumoThermostatAccessory {
     );
 
     this.noteModeIntent(operationMode);
+    if (on) {
+      this.modeWriteAt = Date.now();
+    }
 
     const success = await this.sendDeviceCommand({ operationMode, power });
 
@@ -758,6 +776,9 @@ export class KumoThermostatAccessory {
     );
 
     this.noteModeIntent(operationMode);
+    if (on) {
+      this.modeWriteAt = Date.now();
+    }
 
     const success = await this.sendDeviceCommand({ operationMode, power });
 
@@ -1382,6 +1403,8 @@ export class KumoThermostatAccessory {
       return;
     }
 
+    const gen = ++this.activeWriteGen;
+
     let operationMode: 'off' | 'heat' | 'cool' | 'auto' | 'dry' | 'vent';
     if (!on) {
       operationMode = 'off';
@@ -1400,6 +1423,23 @@ export class KumoThermostatAccessory {
     // write dispatched later in the same scene burst is suppressed rather than
     // reviving the unit. See offRequestedAt.
     this.noteModeIntent(operationMode);
+
+    // An ON for an off unit waits out the scene burst. See modeWriteAt.
+    if (on) {
+      const heldAt = Date.now();
+      if (heldAt - this.modeWriteAt >= this.ACTIVE_ON_HOLD_MS) {
+        await new Promise(resolve => setTimeout(resolve, this.ACTIVE_ON_HOLD_MS));
+      }
+      if (this.modeWriteAt > heldAt - this.ACTIVE_ON_HOLD_MS) {
+        this.platform.log.info(
+          `[ACTIVE] ${this.accessory.displayName}: a mode write in the same burst turns it on — nothing to send`,
+        );
+        return;
+      }
+      if (this.activeWriteGen !== gen) {
+        return;
+      }
+    }
 
     const success = await this.sendDeviceCommand({ operationMode });
 
@@ -1504,6 +1544,7 @@ export class KumoThermostatAccessory {
     // A mode is always an active mode here — HeaterCooler expresses off through
     // Active — so this clears any pending off-suppression window.
     this.noteModeIntent(operationMode);
+    this.modeWriteAt = Date.now();
 
     const success = await this.sendDeviceCommand({ operationMode });
 

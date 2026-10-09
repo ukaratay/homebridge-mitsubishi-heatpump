@@ -10,6 +10,11 @@
 //
 // Fix: ON for a unit that is already running is a no-op. The control below pins
 // the one case where the cache says "running" but the ON is real: an off in flight.
+//
+// The same race exists for a unit that is OFF: a scene that turns it on and picks
+// HEAT sent the ON with the default 'auto' beside the 'heat'. An ON for an off
+// unit is now held briefly and dropped if a mode write lands within the hold on
+// either side of it, since the mode write powers the unit on by itself.
 
 import test from 'node:test';
 import assert from 'node:assert';
@@ -103,5 +108,68 @@ test('control: an ON right behind an in-flight off still turns the unit back on'
   assert.deepStrictEqual(
     sendCommandCalls.map((c) => c.commands),
     [{ operationMode: 'off' }, { operationMode: 'cool' }],
+  );
+});
+
+test('HEAT scene on an OFF unit, ON first: only heat reaches the device', async () => {
+  const { handler, sendCommandCalls } = makeHarness();
+  handler.updateFromZone(zone({ power: 0, operationMode: 'off' }));
+
+  const pOn1 = handler.setActive(Characteristic.Active.ACTIVE);
+  const pMode = handler.setTargetHeaterCoolerState(Characteristic.TargetHeaterCoolerState.HEAT);
+  const pOn2 = handler.setActive(Characteristic.Active.ACTIVE);
+  await Promise.all([pOn1, pMode, pOn2]);
+
+  assert.deepStrictEqual(sendCommandCalls.map((c) => c.commands), [{ operationMode: 'heat' }]);
+});
+
+test('HEAT scene on an OFF unit, mode first: only heat reaches the device', async () => {
+  const { handler, sendCommandCalls } = makeHarness();
+  handler.updateFromZone(zone({ power: 0, operationMode: 'off' }));
+
+  const pMode = handler.setTargetHeaterCoolerState(Characteristic.TargetHeaterCoolerState.HEAT);
+  const pOn = handler.setActive(Characteristic.Active.ACTIVE);
+  await Promise.all([pMode, pOn]);
+
+  assert.deepStrictEqual(sendCommandCalls.map((c) => c.commands), [{ operationMode: 'heat' }]);
+});
+
+test('a plain ON for an OFF unit turns it on exactly once', async () => {
+  const { handler, sendCommandCalls } = makeHarness();
+  handler.updateFromZone(zone({ power: 0, operationMode: 'off' }));
+
+  // Two ONs, as a scene sends them, with no mode write: exactly one power-on.
+  const pOn1 = handler.setActive(Characteristic.Active.ACTIVE);
+  const pOn2 = handler.setActive(Characteristic.Active.ACTIVE);
+  await Promise.all([pOn1, pOn2]);
+
+  // 'auto' is what setActive picks with nothing remembered and no profile loaded.
+  assert.deepStrictEqual(sendCommandCalls.map((c) => c.commands), [{ operationMode: 'auto' }]);
+});
+
+test('an off right behind a held ON wins', async () => {
+  const { handler, sendCommandCalls } = makeHarness();
+  handler.updateFromZone(zone({ power: 0, operationMode: 'off' }));
+
+  const pOn = handler.setActive(Characteristic.Active.ACTIVE);
+  const pOff = handler.setActive(Characteristic.Active.INACTIVE);
+  await Promise.all([pOn, pOff]);
+
+  assert.deepStrictEqual(sendCommandCalls.map((c) => c.commands), [{ operationMode: 'off' }]);
+});
+
+test('control: an ON long after the last mode write is not swallowed', async () => {
+  const { handler, sendCommandCalls } = makeHarness();
+  handler.updateFromZone(zone({ power: 1, operationMode: 'cool' }));
+
+  await handler.setTargetHeaterCoolerState(Characteristic.TargetHeaterCoolerState.HEAT);
+  await handler.setActive(Characteristic.Active.INACTIVE);
+  await new Promise(resolve => setTimeout(resolve, 1600));
+  // The off's success left the cache at off, so this is an ON for an off unit.
+  await handler.setActive(Characteristic.Active.ACTIVE);
+
+  assert.deepStrictEqual(
+    sendCommandCalls.map((c) => c.commands),
+    [{ operationMode: 'heat' }, { operationMode: 'off' }, { operationMode: 'auto' }],
   );
 });
