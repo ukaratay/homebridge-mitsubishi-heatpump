@@ -2073,8 +2073,12 @@ export class KumoThermostatAccessory {
 
   /** Send a vane value, validate it, and reconcile the characteristics. */
   private async writeVane(vane: VaneDirection, label: string): Promise<boolean> {
+    // Every refusal below reverts through revertSoon, never synchronously: HAP
+    // assigns the written value after this handler returns, which would overwrite
+    // an immediate revert and leave the tile showing a vane the unit is not in.
     if (!isVaneDirection(vane)) {
       this.platform.log.error(`[${label}] ${this.accessory.displayName}: refusing invalid vane "${vane}"`);
+      this.revertSoon();
       return false;
     }
 
@@ -2084,6 +2088,7 @@ export class KumoThermostatAccessory {
       this.platform.log.debug(
         `[${label}] ${this.accessory.displayName}: an off is in flight — not sending vane`,
       );
+      this.revertSoon();
       return false;
     }
 
@@ -2096,7 +2101,7 @@ export class KumoThermostatAccessory {
       this.notifyStatusListeners();
     } else {
       this.platform.log.error(`[${label}] ${this.accessory.displayName}: failed to set vane "${vane}"`);
-      this.syncVaneCharacteristics(this.currentStatus?.airDirection ?? 'auto');
+      this.revertSoon();
     }
     return success;
   }

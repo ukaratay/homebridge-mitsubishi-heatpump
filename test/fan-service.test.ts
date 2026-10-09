@@ -356,6 +356,43 @@ function makeLinkAwareHarness() {
   return { handler, accessory, linked, isPrimary: () => primary };
 }
 
+// ---- Vane revert -----------------------------------------------------------
+//
+// hap-nodejs assigns the written value AFTER the onSet handler resolves
+// (Characteristic.handleSetRequest: `await this.setHandler(...)`, then
+// `this.value = value`). A revert made inside the handler is overwritten, so these
+// tests replay that assignment before checking the tile came back.
+
+const settle = () => new Promise((r) => setTimeout(r, 150));
+
+test('a failed vane write puts SwingMode back after HAP stores the written value', async () => {
+  const { handler, heaterCooler } = makeHarness();
+  handler.updateFromZone(zone({ airDirection: 'auto' }));
+  handler['kumoAPI'].sendCommand = async () => false;
+
+  await handler.setSwingMode(Characteristic.SwingMode.SWING_ENABLED);
+  heaterCooler.getCharacteristic(Characteristic.SwingMode).value = Characteristic.SwingMode.SWING_ENABLED;
+  await settle();
+
+  assert.strictEqual(heaterCooler.getCharacteristic(Characteristic.SwingMode).value,
+    Characteristic.SwingMode.SWING_DISABLED);
+});
+
+test('a vane write refused behind an off puts SwingMode back too', async () => {
+  const { handler, heaterCooler, sendCommandCalls } = makeHarness();
+  handler.updateFromZone(zone({ airDirection: 'auto' }));
+
+  const pOff = handler.setActive(Characteristic.Active.INACTIVE);
+  const pSwing = handler.setSwingMode(Characteristic.SwingMode.SWING_ENABLED);
+  await Promise.all([pOff, pSwing]);
+  heaterCooler.getCharacteristic(Characteristic.SwingMode).value = Characteristic.SwingMode.SWING_ENABLED;
+  await settle();
+
+  assert.deepStrictEqual(sendCommandCalls.map((c) => c.commands), [{ operationMode: 'off' }]);
+  assert.strictEqual(heaterCooler.getCharacteristic(Characteristic.SwingMode).value,
+    Characteristic.SwingMode.SWING_DISABLED);
+});
+
 test('the HeaterCooler is declared the primary service', () => {
   const { isPrimary } = makeLinkAwareHarness();
   assert.strictEqual(isPrimary(), true,
