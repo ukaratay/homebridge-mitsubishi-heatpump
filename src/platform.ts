@@ -70,6 +70,11 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
 
   public readonly accessories: PlatformAccessory[] = [];
   private readonly accessoryHandlers: KumoThermostatAccessory[] = [];
+  // One function for the platform's lifetime, so a discovery retry that reaches
+  // streaming again does not subscribe twice (the API holds callbacks in a Set).
+  private readonly applyDeviceConnection = (serial: string, connected: boolean): void => {
+    this.accessoryHandlers.find(h => h.getDeviceSerial() === serial)?.setCloudConnected(connected);
+  };
   private readonly kumoAPI: KumoAPI;
   // Read by KumoThermostatAccessory for the per-accessory display options
   // (showDrySwitch / showFanOnlySwitch / exposeVaneSlat).
@@ -377,6 +382,10 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
       // Start streaming for all devices
       const allDeviceSerials = discoveredDevices.map(d => d.deviceSerial);
       if (allDeviceSerials.length > 0) {
+        // Subscribe BEFORE streaming starts so the initial `device_status_v2` burst
+        // isn't missed: a unit already offline at boot should come up as No Response
+        // rather than serving a stale shadow record as if it were live.
+        this.kumoAPI.onDeviceConnectionStatusChange(this.applyDeviceConnection);
         this.log.info('Starting streaming for real-time updates...');
         const streamingStarted = await this.kumoAPI.startStreaming(allDeviceSerials);
 

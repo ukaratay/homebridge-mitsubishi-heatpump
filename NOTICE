@@ -53,6 +53,17 @@ principal changes are:
 
 See CHANGELOG.md for the full list.
 
+LATER PORTS FROM UPSTREAM
+-------------------------
+Upstream has since added an Apache-2.0 LICENSE file (commit 45133b2). Two features
+were ported from upstream after the fork point, under that license, and adapted
+to the HeaterCooler service:
+
+  - Zombie-stream detection and recovery (upstream commit 59879da),
+    in src/kumo-api.ts.
+  - Adapter reachability surfaced as No Response in HomeKit (upstream commit
+    7941fe1), in src/accessory.ts, src/kumo-api.ts and src/platform.ts.
+
 ================================================================================
 2. pykumo
 ================================================================================

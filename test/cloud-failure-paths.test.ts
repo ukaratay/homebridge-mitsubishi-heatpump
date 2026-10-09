@@ -45,7 +45,7 @@ function delay(ms: number): Promise<void> {
 
 type KumoStub =
   Pick<KumoAPI, 'destroy'>
-  & Partial<Pick<KumoAPI, 'login' | 'getSites' | 'getZones' | 'startStreaming'>>;
+  & Partial<Pick<KumoAPI, 'login' | 'getSites' | 'getZones' | 'startStreaming' | 'onDeviceConnectionStatusChange'>>;
 
 /** Homebridge's `platformAccessory` constructor. Never `new`ed on these paths. */
 class FakePlatformAccessory {}
@@ -324,6 +324,7 @@ test('a socket that never connects still degrades to polling at startup', async 
     getSites: async () => [SITE],
     getZones: async () => [ZONE],
     startStreaming: async () => false, // the socket never came up
+    onDeviceConnectionStatusChange: () => {},
     destroy: () => {},
   };
   const platform = makePlatform(kumo, { disablePolling: true });
@@ -446,6 +447,29 @@ test('one throwing profile_update consumer does not skip the others', async () =
     try {
       assert.doesNotThrow(() => socket.fire('profile_update', { deviceSerial: SERIAL }));
       assert.deepStrictEqual(seen, [SERIAL], 'every remaining accessory still gets its profile');
+    } finally {
+      api.destroy();
+    }
+  });
+});
+
+// ---- 5. device_status_v2 drives reachability ------------------------------
+
+test('device_status_v2 reports each connection change once, and a throwing consumer stays contained', async () => {
+  await withFakeSocket(async (socket) => {
+    const api = await streamingApi(socket);
+    const seen: Array<[string, boolean]> = [];
+    api.onDeviceConnectionStatusChange(() => {
+      throw new Error('accessory blew up applying reachability');
+    });
+    api.onDeviceConnectionStatusChange((serial, connected) => seen.push([serial, connected]));
+
+    try {
+      const offline = { deviceSerial: SERIAL, status: 'disconnected', lastDisconnectedReason: 'IoT Disconnected' };
+      assert.doesNotThrow(() => socket.fire('device_status_v2', offline));
+      socket.fire('device_status_v2', offline); // repeated verdict: no new edge
+      socket.fire('device_status_v2', { deviceSerial: SERIAL, status: 'connected' });
+      assert.deepStrictEqual(seen, [[SERIAL, false], [SERIAL, true]]);
     } finally {
       api.destroy();
     }

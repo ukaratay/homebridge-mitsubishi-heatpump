@@ -53,6 +53,7 @@ export function toCloudCommands(commands: Commands): CloudCommands {
 
 // Event callback types
 export type DeviceUpdateCallback = (deviceSerial: string, status: Partial<DeviceStatus>) => void;
+export type DeviceConnectionCallback = (deviceSerial: string, connected: boolean) => void;
 export type DeviceProfileCallback = (deviceSerial: string, profile: DeviceProfile) => void;
 export type SensorUpdateCallback = (reading: SensorReading) => void;
 
@@ -99,6 +100,9 @@ export class KumoAPI {
   private socket: Socket | null = null;
   private streamingEnabled: boolean = true;
   private deviceUpdateCallbacks: Map<string, DeviceUpdateCallback> = new Map();
+  // Last `device_status_v2` verdict per serial, so listeners hear only changes.
+  private deviceConnectionStatus: Map<string, boolean> = new Map();
+  private deviceConnectionCallbacks: Set<DeviceConnectionCallback> = new Set();
 
   // Device profiles, delivered to the accessories via `profile_update`.
   private deviceProfileCallbacks: Set<DeviceProfileCallback> = new Set();
@@ -134,6 +138,18 @@ export class KumoAPI {
   private streamingHealthCheckInterval: number = 30000; // 30s default
   private isStreamingHealthy: boolean = false;
   private isReconnecting: boolean = false; // Suppresses health notifications during planned reconnects
+  // Zombie-stream detection. checkStreamingHealth() only asks "is the socket
+  // connected?" — it can't see a stream that stays connected while its device_update
+  // subscription silently dies. The cloud only pushes device_update on real state
+  // change, so a long device_update silence is ambiguous (idle vs zombie); an active
+  // status nudge disambiguates. See checkStreamingLiveness().
+  private lastDeviceUpdateTs: number = 0;
+  private probePendingSince: number = 0; // when the current status nudge was sent (0 = none pending)
+  private lastZombieReconnectTs: number = 0;
+  private forceStatusOnNextConnect: boolean = false;
+  private static readonly PROBE_AFTER_MS = 300000; // 5 min of device_update silence → nudge for status
+  private static readonly PROBE_GRACE_MS = 150000; // 2.5 min for ANY device to answer the nudge (adapters: 6–65s)
+  private static readonly ZOMBIE_RECONNECT_COOLDOWN_MS = 300000; // ≥5 min between zombie reconnects
 
   // Rate limiting and retry tracking
   private refreshRetryCount: number = 0;
@@ -762,6 +778,12 @@ export class KumoAPI {
         this.notifyHealthChange(false, true);
         this.startHealthChecks();
 
+        // Seed the zombie-detection clock so a freshly (re)connected socket gets a
+        // full grace period before checkStreamingLiveness() can nudge, and clear any
+        // probe that was mid-flight against the old socket.
+        this.lastDeviceUpdateTs = Date.now();
+        this.probePendingSince = 0;
+
         // Account-level subscribe (required for adapter_update events)
         const userId = this.getUserIdFromToken();
         if (userId) {
@@ -769,8 +791,11 @@ export class KumoAPI {
           this.socket?.emit('subscribe', '', userId);
         }
 
-        // On initial connection, request device profiles and status
-        if (!isRoutineReconnect) {
+        // On initial connection — or when recovering from a zombie stream — request
+        // device profiles and status. The zombie path (forceStatusOnNextConnect) must
+        // re-issue these nudges so device_update actually resumes; a plain routine
+        // (token-refresh) reconnect skips them since the stream was already live.
+        if (!isRoutineReconnect || this.forceStatusOnNextConnect) {
           for (const deviceSerial of deviceSerials) {
             if (!deviceSerial || typeof deviceSerial !== 'string' || deviceSerial.trim().length === 0) {
               continue;
@@ -788,6 +813,7 @@ export class KumoAPI {
             this.socket?.emit('device_status_v2', deviceSerial);
           }
         }
+        this.forceStatusOnNextConnect = false;
 
         // LOG: Streaming started (only for initial connection)
         if (!isRoutineReconnect) {
@@ -797,6 +823,7 @@ export class KumoAPI {
       });
 
       this.socket.on('device_update', (data: any) => {
+        this.lastDeviceUpdateTs = Date.now();
         const deviceSerial = data.deviceSerial;
         if (!deviceSerial) {
           return;
@@ -852,17 +879,31 @@ export class KumoAPI {
         }
       });
 
-      // Logging only. The connection status this used to cache, and the callbacks it
-      // used to fan out to, had no consumer anywhere in the plugin.
+      // Adapter reachability. The platform turns a disconnect into No Response in
+      // HomeKit (accessory.ts:setCloudConnected).
       this.socket.on('device_status_v2', (data: any) => {
         const serial = data.deviceSerial;
         if (!serial) {
           return;
         }
-        if (data.status === 'disconnected') {
+        const isConnected = data.status !== 'disconnected';
+        const wasConnected = this.deviceConnectionStatus.get(serial);
+        this.deviceConnectionStatus.set(serial, isConnected);
+
+        if (!isConnected) {
           this.log.warn(`Device ${serial} reported offline (reason: ${data.lastDisconnectedReason || 'unknown'})`);
         } else {
           this.log.debug(`Device status for ${serial}: ${data.status}`);
+        }
+
+        if (wasConnected !== isConnected) {
+          for (const callback of this.deviceConnectionCallbacks) {
+            try {
+              callback(serial, isConnected);
+            } catch (e) {
+              this.log.error(`Connection status callback error for ${serial}: ${(e as Error).message}`);
+            }
+          }
         }
       });
 
@@ -1000,6 +1041,11 @@ export class KumoAPI {
     this.deviceUpdateCallbacks.delete(deviceSerial);
   }
 
+  /** Subscribe to adapter connect/disconnect changes. The same function is held once. */
+  onDeviceConnectionStatusChange(callback: DeviceConnectionCallback): void {
+    this.deviceConnectionCallbacks.add(callback);
+  }
+
   isStreamingConnected(): boolean {
     return this.socket?.connected || false;
   }
@@ -1086,10 +1132,10 @@ export class KumoAPI {
   }
 
   /**
-   * Check if streaming is healthy (socket connected)
-   * Note: Socket.io has built-in heartbeats and will fire disconnect events
-   * if the connection is lost. We don't need to check data freshness since
-   * KumoCloud only sends updates when device state changes.
+   * Check if streaming is healthy (socket connected).
+   * Socket.io fires disconnect events if the transport drops, so this catches a
+   * dead socket. It does NOT catch a "zombie" — a socket that stays connected while
+   * its device_update subscription silently dies. checkStreamingLiveness() covers that.
    */
   private checkStreamingHealth(): void {
     const wasHealthy = this.isStreamingHealthy;
@@ -1098,6 +1144,87 @@ export class KumoAPI {
     // Socket.io handles heartbeats automatically and will disconnect if connection is lost
     this.isStreamingHealthy = this.isStreamingConnected();
     this.notifyHealthChange(wasHealthy, this.isStreamingHealthy);
+  }
+
+  /**
+   * Detect and recover a "zombie" stream: a socket that stays TCP-connected while its
+   * device_update subscription silently dies. Ported from upstream
+   * homebridge-mitsubishi-comfort 59879da, which observed it live on 2026-08-15:
+   * after an all-units-off burst, device_update went silent for 13 min while
+   * profile_update kept arriving on its ~2–4 min heartbeat and health stayed
+   * "healthy", so the plugin went deaf to real state changes with no recovery.
+   *
+   * The cloud only pushes device_update on real STATE CHANGE, so a long silence is
+   * just as much the signature of an idle stream, and profile_update flows in both
+   * cases. The only reliable discriminator is an active nudge: force a status request
+   * and see whether ANY device answers with a device_update.
+   *
+   * State machine, ticked from the health-check timer:
+   *   quiet < PROBE_AFTER_MS ............... healthy, do nothing
+   *   quiet ≥ PROBE_AFTER_MS, no probe yet . send one iuStatus nudge to all devices
+   *   probe pending, a device_update landed  quiet < PROBE_AFTER_MS again → clear probe
+   *   probe pending > PROBE_GRACE_MS, silent zombie confirmed → reconnect (forceStatus)
+   *
+   * Upstream first tried a probe that declared a zombie when a nudge went unanswered
+   * for 20s, and removed it after it false-fired on adapters that answer in 6–65s.
+   * Here the grace is 2.5 min and ANY one device answering clears it, so a slow or
+   * partly unresponsive fleet never trips it. Reconnects are rate-limited by
+   * ZOMBIE_RECONNECT_COOLDOWN_MS.
+   */
+  private checkStreamingLiveness(): void {
+    if (this.isReconnecting || !this.isStreamingConnected()) {
+      this.probePendingSince = 0; // can't judge; abandon any in-flight probe
+      return;
+    }
+    if (this.lastDeviceUpdateTs === 0) {
+      return; // fresh connection seeds this; nothing to judge yet
+    }
+    const now = Date.now();
+
+    // device_update flowing, on its own or in answer to a nudge: the stream is alive.
+    // An answer always lands here, since it arrives within PROBE_GRACE_MS of a
+    // nudge and PROBE_GRACE_MS < PROBE_AFTER_MS, so it also clears any pending probe.
+    const deviceStale = now - this.lastDeviceUpdateTs;
+    if (deviceStale < KumoAPI.PROBE_AFTER_MS) {
+      this.probePendingSince = 0;
+      return;
+    }
+
+    // device_update quiet too long. Nudge once, then wait out the grace window.
+    if (this.probePendingSince === 0) {
+      if ((now - this.lastZombieReconnectTs) < KumoAPI.ZOMBIE_RECONNECT_COOLDOWN_MS) {
+        return; // just reconnected; give it room before probing again
+      }
+      this.probePendingSince = now;
+      this.nudgeDeviceStatus();
+      this.log.debug(`Streaming quiet ${Math.round(deviceStale / 1000)}s — nudging device status`);
+      return;
+    }
+
+    // Nudge still unanswered within grace → keep waiting.
+    if ((now - this.probePendingSince) < KumoAPI.PROBE_GRACE_MS) {
+      return;
+    }
+
+    // Grace elapsed and NO device answered the nudge → zombie. Reconnect.
+    this.probePendingSince = 0;
+    this.lastZombieReconnectTs = now;
+    this.forceStatusOnNextConnect = true;
+    this.log.warn(
+      `⚠ Streaming zombie: no device_update for ${Math.round(deviceStale / 1000)}s ` +
+      'and a status nudge went unanswered — forcing reconnect',
+    );
+    this.reconnectStreaming().catch(e =>
+      this.log.warn(`Zombie reconnect failed: ${(e as Error).message}`));
+  }
+
+  /** Ask every subscribed device to re-report indoor-unit status (→ device_update). */
+  private nudgeDeviceStatus(): void {
+    for (const serial of this.deviceUpdateCallbacks.keys()) {
+      if (serial && typeof serial === 'string' && serial.trim().length > 0) {
+        this.socket?.emit('force_adapter_request', serial, 'iuStatus');
+      }
+    }
   }
 
   /**
@@ -1157,6 +1284,7 @@ export class KumoAPI {
 
     this.healthCheckTimer = setInterval(() => {
       this.checkStreamingHealth();
+      this.checkStreamingLiveness();
     }, this.streamingHealthCheckInterval);
 
     this.log.debug('Started streaming health checks');

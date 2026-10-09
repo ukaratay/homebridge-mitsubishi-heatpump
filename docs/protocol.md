@@ -73,8 +73,11 @@ socket.io. Streaming is the primary update path; cloud polling is the fallback.
 | `force_adapter_request(serial, 'iuStatus' \| 'profile' \| 'adapterStatus')` | On first connect, pull current state rather than waiting for a push |
 | `device_status_v2('')` and `device_status_v2(serial)` | Request connection status |
 
-`force_adapter_request` and `device_status_v2` are sent on the initial connection only,
-not on routine reconnects.
+`force_adapter_request` and `device_status_v2` are sent on the initial connection and after
+a zombie-stream reconnect, not on routine (token-refresh) reconnects. While the stream is
+connected but `device_update` has been silent for 5 minutes, one
+`force_adapter_request(serial, 'iuStatus')` per device asks for status; if no device
+answers within 2.5 minutes, the stream is reconnected.
 
 **Received:**
 
@@ -84,7 +87,7 @@ not on routine reconnects.
 | `profile_update` | Capabilities, fan-speed count, setpoint limits |
 | `sensor_update` | A paired wireless sensor's temperature, humidity and battery |
 | `adapter_update` | Adapter firmware and RSSI. Formerly also the local-control password |
-| `device_status_v2` | Connected / disconnected. **Logging only** — nothing in the plugin consumes it |
+| `device_status_v2` | Connected / disconnected. A disconnect turns the unit's tiles into No Response |
 | `acoil_update` | Outdoor unit. Minimal, debug-logged |
 
 `operationMode` is **sent** as `'auto'` but **returned** as `'autoHeat'` or `'autoCool'`.

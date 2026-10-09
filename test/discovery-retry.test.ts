@@ -25,7 +25,7 @@ const ZONE = {
 
 type KumoStub =
   Pick<KumoAPI, 'destroy'>
-  & Partial<Pick<KumoAPI, 'login' | 'getSites' | 'getZones' | 'startStreaming'>>;
+  & Partial<Pick<KumoAPI, 'login' | 'getSites' | 'getZones' | 'startStreaming' | 'onDeviceConnectionStatusChange'>>;
 
 /** A stand-in accessory handler: only what the idempotency guard calls. */
 type HandlerStub = Pick<KumoThermostatAccessory, 'getDeviceSerial' | 'getSiteId' | 'destroy'>;
@@ -138,6 +138,7 @@ test('successful discovery clears the retry timer and resets backoff', async () 
     getSites: async () => [SITE],
     getZones: async () => [ZONE],
     startStreaming: async () => true,
+    onDeviceConnectionStatusChange: () => {},
     destroy: () => {},
   };
   const { platform } = makePlatform(stub);
@@ -158,6 +159,7 @@ test('idempotent: an already-handled device is not re-registered', async () => {
     getSites: async () => [SITE],
     getZones: async () => [ZONE],
     startStreaming: async () => true,
+    onDeviceConnectionStatusChange: () => {},
     destroy: () => {},
   };
   const { platform, spies } = makePlatform(stub);
@@ -177,6 +179,7 @@ test('transient empty zones does NOT unregister cached accessories', async () =>
     getSites: async () => [SITE],
     getZones: async () => [], // transient failure returns no zones
     startStreaming: async () => true,
+    onDeviceConnectionStatusChange: () => {},
     destroy: () => {},
   };
   const { platform, spies } = makePlatform(stub);

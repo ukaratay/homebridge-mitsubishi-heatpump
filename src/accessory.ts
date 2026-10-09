@@ -64,6 +64,9 @@ export class KumoThermostatAccessory {
   // status source and cloud updates are dropped (the cloud lags ~7-10s and would
   // otherwise clobber fresher local data). Should exceed the local poll interval.
   private readonly LOCAL_AUTHORITATIVE_MS = 45000;
+  // Cloud-reported adapter reachability from `device_status_v2`. null = nothing
+  // reported yet (treated as reachable). See setCloudConnected.
+  private cloudConnected: boolean | null = null;
 
   // ---- Paired wireless sensor (cloud `sensor_update`) ---------------------
   // The unit quantizes its own roomTemp to 0.5°C before reporting it; the paired
@@ -372,10 +375,14 @@ export class KumoThermostatAccessory {
       if (this.currentStatus) {
         this.currentStatus.roomTemp = temperature;
       }
-      this.service.updateCharacteristic(
-        this.platform.Characteristic.CurrentTemperature,
-        temperature,
-      );
+      // Cached either way; published only while reachable, so a sensor reading
+      // does not paint over No Response (recovery republishes it).
+      if (this.isReachable()) {
+        this.service.updateCharacteristic(
+          this.platform.Characteristic.CurrentTemperature,
+          temperature,
+        );
+      }
       this.platform.log.debug(
         `[SENSOR] ${this.accessory.displayName}: ${temperature}°C ` +
         `(${cToF(temperature).toFixed(2)}°F) from the paired wireless sensor`,
@@ -395,10 +402,12 @@ export class KumoThermostatAccessory {
           this.hasHumiditySensor = true;
           this.setupHumidityService();
         }
-        this.humidityService?.updateCharacteristic(
-          this.platform.Characteristic.CurrentRelativeHumidity,
-          humidity,
-        );
+        if (this.isReachable()) {
+          this.humidityService?.updateCharacteristic(
+            this.platform.Characteristic.CurrentRelativeHumidity,
+            humidity,
+          );
+        }
       }
     }
 
@@ -653,6 +662,7 @@ export class KumoThermostatAccessory {
   }
 
   async getFanOnlyOn(): Promise<CharacteristicValue> {
+    this.assertReachable();
     return this.isFanOnlyActive(this.currentStatus);
   }
 
@@ -763,6 +773,7 @@ export class KumoThermostatAccessory {
   }
 
   async getDryOn(): Promise<CharacteristicValue> {
+    this.assertReachable();
     return this.isDryActive(this.currentStatus);
   }
 
@@ -933,6 +944,105 @@ export class KumoThermostatAccessory {
   }
 
   // Called by platform when new zone data is available
+  /**
+   * Cloud reachability, driven by the `device_status_v2` streaming event.
+   *
+   * Ported from upstream homebridge-mitsubishi-comfort 7941fe1. Observed there on
+   * 2026-09-10: a unit's Wi-Fi adapter was off the network for ~22h while the cloud
+   * kept serving its last known state (`cool, power=1`, `connected=true`, a fresh
+   * `updatedAt`) from a frozen shadow record. HomeKit showed a tile that was wrong
+   * and unactionable: every `off` returned HTTP 200 and reached nothing. The cloud
+   * reported "offline (reason: IoT Disconnected)" the whole time through
+   * `device_status_v2`. Surfacing that as No Response stops the tile from passing
+   * a frozen record off as live. Writes still go out; see assertReachable.
+   */
+  public setCloudConnected(connected: boolean): void {
+    const wasReachable = this.isReachable();
+    this.cloudConnected = connected;
+    const nowReachable = this.isReachable();
+
+    if (wasReachable === nowReachable) {
+      return;
+    }
+
+    if (nowReachable) {
+      this.platform.log.info(`[REACHABILITY] ${this.accessory.displayName}: back online`);
+      if (this.currentStatus) {
+        this.publishStatus(this.currentStatus);
+      }
+    } else {
+      this.platform.log.warn(
+        `[REACHABILITY] ${this.accessory.displayName}: unreachable — the adapter is offline and ` +
+        'there is no local LAN path. Showing No Response in HomeKit; its last reported state is stale. ' +
+        'Commands are still sent.',
+      );
+      this.pushUnreachable();
+    }
+  }
+
+  /**
+   * Unreachable ONLY when the cloud has explicitly reported the adapter disconnected
+   * and no local path exists. A unit still answering over the LAN is reachable
+   * whatever the cloud thinks, and `null` (nothing reported yet) counts as reachable
+   * so a fresh start never flashes No Response before the first status arrives.
+   */
+  public isReachable(): boolean {
+    const local = this.platform.localClient;
+    if (local && local.hasLocal(this.deviceSerial)) {
+      return true;
+    }
+    return this.cloudConnected !== false;
+  }
+
+  /**
+   * HAP's "no response" signal. Falls back to a bare Error, which HomeKit also reads
+   * as unreachable, for test harnesses that stub `platform.api` without `hap`.
+   */
+  private unreachableError(): Error {
+    const hap = this.platform.api?.hap as
+      | { HapStatusError?: new (s: number) => Error; HAPStatus?: { SERVICE_COMMUNICATION_FAILURE: number } }
+      | undefined;
+    if (hap?.HapStatusError && hap.HAPStatus) {
+      return new hap.HapStatusError(hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
+    }
+    return new Error('Device unreachable');
+  }
+
+  /**
+   * Guard for every characteristic getter: throwing is what puts the accessory into
+   * No Response, rather than handing HomeKit a stale cached value as if it were live.
+   *
+   * Setters are deliberately NOT guarded. Upstream removed this signal once
+   * (8b54033, 2026-03-08) because `device_status_v2` falsely reported units offline
+   * and every tile went No Response. If that recurs, a guarded setter would also
+   * refuse the user's "off". So writes always go out; against a really offline
+   * adapter the cloud accepts them and they reach nothing, which is no worse than
+   * before this existed.
+   */
+  private assertReachable(): void {
+    if (!this.isReachable()) {
+      throw this.unreachableError();
+    }
+  }
+
+  /** Push the error to HomeKit immediately instead of waiting for the next read. */
+  private pushUnreachable(): void {
+    const err = this.unreachableError() as never;
+    const C = this.platform.Characteristic;
+    for (const characteristic of [
+      C.Active,
+      C.CurrentHeaterCoolerState,
+      C.TargetHeaterCoolerState,
+      C.CurrentTemperature,
+    ]) {
+      this.service.updateCharacteristic(characteristic, err);
+    }
+    this.fanService?.updateCharacteristic(C.Active, err);
+    this.fanOnlyService?.updateCharacteristic(C.On, err);
+    this.dryService?.updateCharacteristic(C.On, err);
+    this.humidityService?.updateCharacteristic(C.CurrentRelativeHumidity, err);
+  }
+
   public updateFromZone(zone: Zone) {
     const updateTimestamp = Date.now();
     this.processZoneUpdate(zone, 'polling', updateTimestamp);
@@ -1145,72 +1255,91 @@ export class KumoThermostatAccessory {
       // single target temperature to name.
       this.platform.log.debug(`${this.accessory.displayName}: ${status.roomTemp}°C (heat ${status.spHeat}°C / cool ${status.spCool}°C, mode: ${status.operationMode})`);
 
-      // Update all characteristics
-      this.refreshClimateCharacteristics();
-
-      // Fan and vane ride along with every status update. Both live on the
-      // Fanv2 service now, so they go through their own sync helpers.
-      this.syncFanCharacteristics(status.fanSpeed);
-      this.syncVaneCharacteristics(status.airDirection);
-
-      // Only update temperature if valid
-      if (status.roomTemp !== undefined && status.roomTemp !== null && !isNaN(status.roomTemp)) {
-        this.service.updateCharacteristic(
-          this.platform.Characteristic.CurrentTemperature,
-          status.roomTemp,
+      // A unit whose adapter is offline has no live state to publish: anything
+      // arriving now is the cloud replaying its frozen shadow record. Keep the
+      // cached status (recovery republishes it) but leave HomeKit in No Response,
+      // and don't mirror a stale reading onto a live target.
+      if (!this.isReachable()) {
+        this.platform.log.debug(
+          `[${this.deviceSerial}] Unreachable — cached ${source} update without publishing to HomeKit`,
         );
+        return;
       }
 
-      // HeaterCooler has no single TargetTemperature; the two thresholds below
-      // carry the setpoints in every mode.
-
-      // Keep the AUTO-mode threshold characteristics in sync with the live band.
-      // The Home app only surfaces these in AUTO; refreshing them in any mode is
-      // harmless (each is independent within its own min/max props, so a unit
-      // sitting in heat/cool with an inverted spHeat>spCool pair never trips a
-      // HomeKit constraint — the values just aren't shown until AUTO is selected).
-      if (status.spHeat !== undefined && status.spHeat !== null && !isNaN(status.spHeat)) {
-        this.service.updateCharacteristic(
-          this.platform.Characteristic.HeatingThresholdTemperature,
-          status.spHeat,
-        );
-      }
-      if (status.spCool !== undefined && status.spCool !== null && !isNaN(status.spCool)) {
-        this.service.updateCharacteristic(
-          this.platform.Characteristic.CoolingThresholdTemperature,
-          status.spCool,
-        );
-      }
-
-      // Only update humidity if the device has a humidity sensor
-      if (this.hasHumiditySensor && status.humidity !== null) {
-        this.humidityService?.updateCharacteristic(
-          this.platform.Characteristic.CurrentRelativeHumidity,
-          status.humidity,
-        );
-      }
-
-      // Keep the fan-only switch in sync with the underlying device mode
-      if (this.fanOnlyService) {
-        this.fanOnlyService.updateCharacteristic(
-          this.platform.Characteristic.On,
-          this.isFanOnlyActive(status),
-        );
-      }
-
-      // Keep the dry switch in sync with the underlying device mode
-      if (this.dryService) {
-        this.dryService.updateCharacteristic(
-          this.platform.Characteristic.On,
-          this.isDryActive(status),
-        );
-      }
+      this.publishStatus(status);
 
       // Notify mirror listeners — this only runs on an applied update (early
       // returns above skip it), so a dropped/stale update never mirrors.
       this.notifyStatusListeners();
     } catch (error) {
       this.platform.log.error('Error updating device status:', error);
+    }
+  }
+
+  /** Push every characteristic derived from `status` to HomeKit (not while unreachable). */
+  private publishStatus(status: DeviceStatus): void {
+    if (!this.isReachable()) {
+      return;
+    }
+    // Update all characteristics
+    this.refreshClimateCharacteristics();
+
+    // Fan and vane ride along with every status update. Both live on the
+    // Fanv2 service now, so they go through their own sync helpers.
+    this.syncFanCharacteristics(status.fanSpeed);
+    this.syncVaneCharacteristics(status.airDirection);
+
+    // Only update temperature if valid
+    if (status.roomTemp !== undefined && status.roomTemp !== null && !isNaN(status.roomTemp)) {
+      this.service.updateCharacteristic(
+        this.platform.Characteristic.CurrentTemperature,
+        status.roomTemp,
+      );
+    }
+
+    // HeaterCooler has no single TargetTemperature; the two thresholds below
+    // carry the setpoints in every mode.
+
+    // Keep the AUTO-mode threshold characteristics in sync with the live band.
+    // The Home app only surfaces these in AUTO; refreshing them in any mode is
+    // harmless (each is independent within its own min/max props, so a unit
+    // sitting in heat/cool with an inverted spHeat>spCool pair never trips a
+    // HomeKit constraint — the values just aren't shown until AUTO is selected).
+    if (status.spHeat !== undefined && status.spHeat !== null && !isNaN(status.spHeat)) {
+      this.service.updateCharacteristic(
+        this.platform.Characteristic.HeatingThresholdTemperature,
+        status.spHeat,
+      );
+    }
+    if (status.spCool !== undefined && status.spCool !== null && !isNaN(status.spCool)) {
+      this.service.updateCharacteristic(
+        this.platform.Characteristic.CoolingThresholdTemperature,
+        status.spCool,
+      );
+    }
+
+    // Only update humidity if the device has a humidity sensor
+    if (this.hasHumiditySensor && status.humidity !== null) {
+      this.humidityService?.updateCharacteristic(
+        this.platform.Characteristic.CurrentRelativeHumidity,
+        status.humidity,
+      );
+    }
+
+    // Keep the fan-only switch in sync with the underlying device mode
+    if (this.fanOnlyService) {
+      this.fanOnlyService.updateCharacteristic(
+        this.platform.Characteristic.On,
+        this.isFanOnlyActive(status),
+      );
+    }
+
+    // Keep the dry switch in sync with the underlying device mode
+    if (this.dryService) {
+      this.dryService.updateCharacteristic(
+        this.platform.Characteristic.On,
+        this.isDryActive(status),
+      );
     }
   }
 
@@ -1375,6 +1504,7 @@ export class KumoThermostatAccessory {
   // ---- HeaterCooler: Active (on/off) --------------------------------------
 
   async getActive(): Promise<CharacteristicValue> {
+    this.assertReachable();
     if (!this.currentStatus) {
       return this.platform.Characteristic.Active.INACTIVE;
     }
@@ -1490,6 +1620,7 @@ export class KumoThermostatAccessory {
   // ---- HeaterCooler: mode --------------------------------------------------
 
   async getCurrentHeaterCoolerState(): Promise<CharacteristicValue> {
+    this.assertReachable();
     if (!this.currentStatus) {
       return this.platform.Characteristic.CurrentHeaterCoolerState.INACTIVE;
     }
@@ -1497,6 +1628,7 @@ export class KumoThermostatAccessory {
   }
 
   async getTargetHeaterCoolerState(): Promise<CharacteristicValue> {
+    this.assertReachable();
     if (!this.currentStatus) {
       return this.platform.Characteristic.TargetHeaterCoolerState.AUTO;
     }
@@ -1566,7 +1698,8 @@ export class KumoThermostatAccessory {
 
   /** Push Active + both state characteristics from the current cached status. */
   private refreshClimateCharacteristics(): void {
-    if (!this.currentStatus) {
+    // Unreachable: the cache is updated, but HomeKit stays in No Response.
+    if (!this.currentStatus || !this.isReachable()) {
       return;
     }
     this.service.updateCharacteristic(
@@ -1724,6 +1857,7 @@ export class KumoThermostatAccessory {
   }
 
   async getFanActive(): Promise<CharacteristicValue> {
+    this.assertReachable();
     if (!this.currentStatus) {
       return this.platform.Characteristic.Active.INACTIVE;
     }
@@ -1764,6 +1898,7 @@ export class KumoThermostatAccessory {
   }
 
   async getCurrentFanState(): Promise<CharacteristicValue> {
+    this.assertReachable();
     const C = this.platform.Characteristic.CurrentFanState;
     if (!this.currentStatus ||
         this.mapToActive(this.currentStatus) === this.platform.Characteristic.Active.INACTIVE) {
@@ -1774,6 +1909,7 @@ export class KumoThermostatAccessory {
   }
 
   async getTargetFanState(): Promise<CharacteristicValue> {
+    this.assertReachable();
     const C = this.platform.Characteristic.TargetFanState;
     return this.currentStatus?.fanSpeed === 'auto' ? C.AUTO : C.MANUAL;
   }
@@ -1820,6 +1956,7 @@ export class KumoThermostatAccessory {
   }
 
   async getRotationSpeed(): Promise<CharacteristicValue> {
+    this.assertReachable();
     return this.fanSpeedToRotation(this.currentStatus?.fanSpeed ?? 'auto');
   }
 
@@ -1990,6 +2127,7 @@ export class KumoThermostatAccessory {
   }
 
   async getSwingMode(): Promise<CharacteristicValue> {
+    this.assertReachable();
     const C = this.platform.Characteristic.SwingMode;
     return this.currentStatus?.airDirection === 'swing' ? C.SWING_ENABLED : C.SWING_DISABLED;
   }
@@ -2007,11 +2145,13 @@ export class KumoThermostatAccessory {
   }
 
   async getCurrentSlatState(): Promise<CharacteristicValue> {
+    this.assertReachable();
     const C = this.platform.Characteristic.CurrentSlatState;
     return this.currentStatus?.airDirection === 'swing' ? C.SWINGING : C.FIXED;
   }
 
   async getTargetTiltAngle(): Promise<CharacteristicValue> {
+    this.assertReachable();
     return this.vaneToTilt(this.currentStatus?.airDirection ?? '') ?? 0;
   }
 
@@ -2092,6 +2232,7 @@ export class KumoThermostatAccessory {
   }
 
   async getCurrentTemperature(): Promise<CharacteristicValue> {
+    this.assertReachable();
     // Never block on API calls - return cached or default value immediately
     if (!this.currentStatus) {
       // A sensor_update can land before the first device_update, and a real
@@ -2131,10 +2272,12 @@ export class KumoThermostatAccessory {
   // low/heat bound, spCool the high/cool bound (these units have no spAuto).
 
   async getHeatingThresholdTemperature(): Promise<CharacteristicValue> {
+    this.assertReachable();
     return this.getThresholdTemperature('spHeat', 20);
   }
 
   async getCoolingThresholdTemperature(): Promise<CharacteristicValue> {
+    this.assertReachable();
     return this.getThresholdTemperature('spCool', 24);
   }
 
@@ -2497,6 +2640,7 @@ export class KumoThermostatAccessory {
    * returned anyway whenever the fetch came back empty.
    */
   async getCurrentRelativeHumidity(): Promise<CharacteristicValue> {
+    this.assertReachable();
     const humidity = this.currentStatus?.humidity || 0;
     this.platform.log.debug('Get CurrentRelativeHumidity:', humidity);
     return humidity;
