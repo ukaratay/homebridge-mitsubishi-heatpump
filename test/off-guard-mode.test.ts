@@ -125,6 +125,23 @@ test('a mode write in an off burst does not re-open the window for the setpoint 
   assert.ok(!sendCommandCalls.some(isActiveMode), 'no active mode reaches the device');
 });
 
+test('AC-off scene: a Dry or Fan-only switch dispatched right after the off does not reach the device', async () => {
+  for (const setSwitch of ['setDryOn', 'setFanOnlyOn'] as const) {
+    const { handler, sendCommandCalls } = makeHarness();
+    handler.updateFromZone(zone({ power: 1, operationMode: 'cool' }));
+
+    const pOff = handler.setActive(Characteristic.Active.INACTIVE);
+    const pSwitch = handler[setSwitch](true);
+    await Promise.all([pOff, pSwitch]);
+
+    assert.deepStrictEqual(
+      sendCommandCalls.map((c) => c.commands),
+      [{ operationMode: 'off' }],
+      `${setSwitch}: the switch's mode would power the unit back on`,
+    );
+  }
+});
+
 test('control: turning the unit on and picking a mode in the same breath still works', async () => {
   const { handler, sendCommandCalls } = makeHarness();
   handler.updateFromZone(zone({ power: 0, operationMode: 'off' }));

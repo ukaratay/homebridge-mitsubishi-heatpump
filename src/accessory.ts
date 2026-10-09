@@ -674,6 +674,15 @@ export class KumoThermostatAccessory {
       `[FAN ONLY] ${this.accessory.displayName}: HomeKit sent ${on ? 'ON' : 'OFF'}`,
     );
 
+    // Same guard as setTargetHeaterCoolerState, and checked before noteModeIntent
+    // for the same reason: an ON trailing an off in one scene burst revives the
+    // unit, and noteModeIntent would clear the window for everything behind it.
+    if (on && this.offInFlight()) {
+      this.platform.log.debug(`[FAN ONLY] ${this.accessory.displayName}: an off is in flight — not sending vent`);
+      this.revertSoon();
+      return;
+    }
+
     this.noteModeIntent(operationMode);
     if (on) {
       this.modeWriteAt = Date.now();
@@ -772,6 +781,15 @@ export class KumoThermostatAccessory {
     this.platform.log.info(
       `[DRY] ${this.accessory.displayName}: HomeKit sent ${on ? 'ON' : 'OFF'}`,
     );
+
+    // Same guard as setTargetHeaterCoolerState, and checked before noteModeIntent
+    // for the same reason: an ON trailing an off in one scene burst revives the
+    // unit, and noteModeIntent would clear the window for everything behind it.
+    if (on && this.offInFlight()) {
+      this.platform.log.debug(`[DRY] ${this.accessory.displayName}: an off is in flight — not sending dry`);
+      this.revertSoon();
+      return;
+    }
 
     this.noteModeIntent(operationMode);
     if (on) {
