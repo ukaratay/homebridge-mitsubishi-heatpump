@@ -1197,13 +1197,14 @@ export class KumoThermostatAccessory {
         humidity: effectiveHumidity,
         // The zones payload carries neither fan speed nor vane (they live in the
         // streaming `device_update` and in GET /devices/{serial}); both are optional
-        // on Adapter for that reason. Default them exactly as the two streaming
-        // paths do. Without this a poll-sourced status held `undefined`, and
-        // mirror.ts's signature (`s.fanSpeed || ''`) then differed from the
-        // streaming-sourced one ('auto') — so every alternation between the two
-        // update sources fired a spurious mirror push.
-        fanSpeed: zone.adapter.fanSpeed || 'auto',
-        airDirection: zone.adapter.airDirection || 'auto',
+        // on Adapter for that reason. Carry the last known value across a poll, and
+        // default to 'auto' only before anything has reported one. Defaulting on
+        // every poll reset a unit on a manual speed or a swinging vane to auto in
+        // HomeKit each time, and changed mirror.ts's signature, so every
+        // alternation between the two update sources pushed fan 'auto' to mirror
+        // targets. The streaming and local paths always fill both fields.
+        fanSpeed: zone.adapter.fanSpeed || this.currentStatus?.fanSpeed || 'auto',
+        airDirection: zone.adapter.airDirection || this.currentStatus?.airDirection || 'auto',
         roomTemp: effectiveRoomTemp,
         spCool: zone.adapter.spCool,
         spHeat: zone.adapter.spHeat,

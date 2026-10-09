@@ -185,6 +185,27 @@ const streamingUpdate = (over: Partial<StreamingUpdate> = {}): StreamingUpdate =
   ...over,
 });
 
+test('a cloud poll keeps the fan speed and vane the stream reported', async () => {
+  // The real zones payload has no fanSpeed or airDirection at all. Defaulting them
+  // on every poll flipped a manual fan to AUTO and a swinging vane to fixed.
+  const { handler } = makeHarness();
+  handler.updateFromZone(cloudZone({ fanSpeed: 'quiet', airDirection: 'swing' }));
+
+  handler.updateFromZone(cloudZone({ fanSpeed: undefined, airDirection: undefined }));
+
+  const status = handler['currentStatus']!;
+  assert.strictEqual(status.fanSpeed, 'quiet');
+  assert.strictEqual(status.airDirection, 'swing');
+  assert.strictEqual(await handler.getTargetFanState(), Characteristic.TargetFanState.MANUAL);
+});
+
+test('before anything reports a fan speed, a poll still defaults it to auto', () => {
+  const { handler } = makeHarness();
+  handler.updateFromZone(cloudZone({ fanSpeed: undefined, airDirection: undefined }));
+  assert.strictEqual(handler['currentStatus']!.fanSpeed, 'auto');
+  assert.strictEqual(handler['currentStatus']!.airDirection, 'auto');
+});
+
 test('a cloud poll does not wipe the standby flag the streaming event delivered', async () => {
   const { handler, emitStreaming } = makeHarness();
   emitStreaming(streamingUpdate({ displayConfig: { standby: true, filter: false, defrost: false } }));
