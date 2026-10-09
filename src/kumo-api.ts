@@ -70,6 +70,11 @@ function asNumberOrNull(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
+/** A device serial worth subscribing to: a non-blank string. */
+function isValidSerial(serial: unknown): serial is string {
+  return typeof serial === 'string' && serial.trim().length > 0;
+}
+
 /**
  * The message to log for a failed request, with the reason the transport buried.
  *
@@ -295,14 +300,7 @@ export class KumoAPI {
 
       return true;
     } catch (error) {
-      if (error instanceof Error) {
-        this.log.error('Login error:', describeRequestError(error));
-        if (this.debugMode) {
-          this.log.debug('Login error stack:', error.stack);
-        }
-      } else {
-        this.log.error('Login error: Unknown error occurred');
-      }
+      this.logRequestError('Login error', error);
       this.loginRetryCount = 0;
       return false;
     }
@@ -438,14 +436,7 @@ export class KumoAPI {
 
       return true;
     } catch (error) {
-      if (error instanceof Error) {
-        this.log.error('Token refresh error:', describeRequestError(error));
-        if (this.debugMode) {
-          this.log.debug('Token refresh error stack:', error.stack);
-        }
-      } else {
-        this.log.error('Token refresh error: Unknown error occurred');
-      }
+      this.logRequestError('Token refresh error', error);
       this.refreshRetryCount = 0;
       this.log.warn('Falling back to full login after refresh error');
       return await this.login();
@@ -568,16 +559,20 @@ export class KumoAPI {
 
       return data;
     } catch (error) {
-      // Log errors without exposing sensitive details
-      if (error instanceof Error) {
-        this.log.error('Request error:', describeRequestError(error));
-        if (this.debugMode) {
-          this.log.debug('Full error stack:', error.stack);
-        }
-      } else {
-        this.log.error('Request error: Unknown error occurred');
-      }
+      this.logRequestError('Request error', error);
       return null;
+    }
+  }
+
+  /** Log a failed request without exposing sensitive details; the stack only in debug. */
+  private logRequestError(context: string, error: unknown): void {
+    if (error instanceof Error) {
+      this.log.error(`${context}:`, describeRequestError(error));
+      if (this.debugMode) {
+        this.log.debug(`${context} stack:`, error.stack);
+      }
+    } else {
+      this.log.error(`${context}: Unknown error occurred`);
     }
   }
 
@@ -588,73 +583,39 @@ export class KumoAPI {
   }
 
   async getZones(siteId: string): Promise<Zone[]> {
-    // Ensure we have a valid token
-    const authenticated = await this.ensureAuthenticated();
-    if (!authenticated) {
-      this.log.error('Failed to authenticate');
+    const zones = await this.makeAuthenticatedRequest<Zone[]>(`/sites/${siteId}/zones`);
+    if (!zones) {
       return [];
     }
 
-    try {
-      const endpoint = `/sites/${siteId}/zones`;
+    if (this.debugMode) {
+      this.log.info(`  Fetched ${zones.length} zone(s) for site ${siteId}`);
 
-      // Debug logging: Show request details
-      if (this.debugMode) {
-        this.log.info(`→ API Request: GET ${endpoint}`);
-      }
-
-      const startTime = Date.now();
-      const response = await fetch(`${API_BASE_URL}${endpoint}`, {
-        headers: this.getAuthHeaders(),
+      // Log raw JSON for each zone to see all available fields
+      zones.forEach(zone => {
+        this.log.info(`  RAW Zone JSON for ${zone.name}:`);
+        this.log.info(JSON.stringify(zone, null, 2));
       });
-      const duration = Date.now() - startTime;
 
-      if (!response.ok) {
-        const errorBody = await response.text();
-        this.log.error(`Failed to fetch zones for site ${siteId}: ${response.status} - ${errorBody}`);
-        return [];
-      }
-
-      const zones = await response.json() as Zone[];
-
-      // Debug logging: Show response details
-      if (this.debugMode) {
-        this.log.info(`← API Response: 200 (${duration}ms)`);
-        this.log.info(`  Fetched ${zones.length} zone(s) for site ${siteId}`);
-
-        // Log raw JSON for each zone to see all available fields
-        zones.forEach(zone => {
-          this.log.info(`  RAW Zone JSON for ${zone.name}:`);
-          this.log.info(JSON.stringify(zone, null, 2));
-        });
-
-        zones.forEach(zone => {
-          const a = zone.adapter;
-          this.log.info(`    ${zone.name} [${a.deviceSerial}]`);
-          this.log.info(`      Temperature: ${a.roomTemp}°C (current) → Heat: ${a.spHeat}°C, Cool: ${a.spCool}°C, Auto: ${a.spAuto}°C`);
-          this.log.info(`      Status: ${a.operationMode} mode, power=${a.power}, connected=${a.connected}`);
-          // Fan speed and vane direction are NOT in the zones payload — this line
-          // used to print "Fan: undefined, Direction: undefined" for every unit on
-          // every poll, which read as "the cloud does not expose vane data" and is
-          // why upstream issue #6 stalled. They are real fields, just on other
-          // endpoints: the streaming `device_update` event and `GET /devices/{serial}`.
-          // Only claim them here when the payload actually carried them.
-          const fan = a.fanSpeed ?? 'n/a (not in zones payload)';
-          const vane = a.airDirection ?? 'n/a (not in zones payload)';
-          this.log.info(`      Fan: ${fan}, Direction: ${vane}, Humidity: ${a.humidity !== null ? a.humidity + '%' : 'N/A'}`);
-          this.log.info(`      Signal: ${a.rssi !== undefined ? a.rssi + ' dBm' : 'N/A'}`);
-        });
-      }
-
-      return zones;
-    } catch (error) {
-      if (error instanceof Error) {
-        this.log.error('Error fetching zones:', describeRequestError(error));
-      } else {
-        this.log.error('Error fetching zones: Unknown error occurred');
-      }
-      return [];
+      zones.forEach(zone => {
+        const a = zone.adapter;
+        this.log.info(`    ${zone.name} [${a.deviceSerial}]`);
+        this.log.info(`      Temperature: ${a.roomTemp}°C (current) → Heat: ${a.spHeat}°C, Cool: ${a.spCool}°C, Auto: ${a.spAuto}°C`);
+        this.log.info(`      Status: ${a.operationMode} mode, power=${a.power}, connected=${a.connected}`);
+        // Fan speed and vane direction are NOT in the zones payload — this line
+        // used to print "Fan: undefined, Direction: undefined" for every unit on
+        // every poll, which read as "the cloud does not expose vane data" and is
+        // why upstream issue #6 stalled. They are real fields, just on other
+        // endpoints: the streaming `device_update` event and `GET /devices/{serial}`.
+        // Only claim them here when the payload actually carried them.
+        const fan = a.fanSpeed ?? 'n/a (not in zones payload)';
+        const vane = a.airDirection ?? 'n/a (not in zones payload)';
+        this.log.info(`      Fan: ${fan}, Direction: ${vane}, Humidity: ${a.humidity !== null ? a.humidity + '%' : 'N/A'}`);
+        this.log.info(`      Signal: ${a.rssi !== undefined ? a.rssi + ' dBm' : 'N/A'}`);
+      });
     }
+
+    return zones;
   }
 
   async sendCommand(deviceSerial: string, commands: Commands): Promise<boolean> {
@@ -714,6 +675,11 @@ export class KumoAPI {
       return false;
     }
 
+    for (const bad of deviceSerials.filter(serial => !isValidSerial(serial))) {
+      this.log.warn(`Skipping invalid device serial: ${bad}`);
+    }
+    deviceSerials = deviceSerials.filter(isValidSerial);
+
     try {
       // Use debug level for routine reconnects (token refresh), info for initial connection
       const logLevel = this.isReconnecting ? 'debug' : 'info';
@@ -763,12 +729,8 @@ export class KumoAPI {
           this.log.info(`✓ Streaming connected (ID: ${this.socket?.id})`);
         }
 
-        // Subscribe to all devices (with validation)
+        // Subscribe to all devices
         for (const deviceSerial of deviceSerials) {
-          if (!deviceSerial || typeof deviceSerial !== 'string' || deviceSerial.trim().length === 0) {
-            this.log.warn(`Skipping invalid device serial: ${deviceSerial}`);
-            continue;
-          }
           this.log.debug(`Subscribing to device: ${deviceSerial}`);
           this.socket?.emit('subscribe', deviceSerial);
         }
@@ -797,9 +759,6 @@ export class KumoAPI {
         // (token-refresh) reconnect skips them since the stream was already live.
         if (!isRoutineReconnect || this.forceStatusOnNextConnect) {
           for (const deviceSerial of deviceSerials) {
-            if (!deviceSerial || typeof deviceSerial !== 'string' || deviceSerial.trim().length === 0) {
-              continue;
-            }
             this.socket?.emit('force_adapter_request', deviceSerial, 'iuStatus');
             this.socket?.emit('force_adapter_request', deviceSerial, 'profile');
             this.socket?.emit('force_adapter_request', deviceSerial, 'adapterStatus');
@@ -807,9 +766,6 @@ export class KumoAPI {
           // Request connection status for all devices
           this.socket?.emit('device_status_v2', '');
           for (const deviceSerial of deviceSerials) {
-            if (!deviceSerial || typeof deviceSerial !== 'string' || deviceSerial.trim().length === 0) {
-              continue;
-            }
             this.socket?.emit('device_status_v2', deviceSerial);
           }
         }
@@ -841,11 +797,7 @@ export class KumoAPI {
         // for every other event on this socket.
         const callback = this.deviceUpdateCallbacks.get(deviceSerial);
         if (callback) {
-          try {
-            callback(deviceSerial, data);
-          } catch (e) {
-            this.log.error(`Device update callback error for ${deviceSerial}: ${(e as Error).message}`);
-          }
+          this.safeCall(`Device update callback error for ${deviceSerial}`, () => callback(deviceSerial, data));
         }
       });
 
@@ -898,11 +850,7 @@ export class KumoAPI {
 
         if (wasConnected !== isConnected) {
           for (const callback of this.deviceConnectionCallbacks) {
-            try {
-              callback(serial, isConnected);
-            } catch (e) {
-              this.log.error(`Connection status callback error for ${serial}: ${(e as Error).message}`);
-            }
+            this.safeCall(`Connection status callback error for ${serial}`, () => callback(serial, isConnected));
           }
         }
       });
@@ -934,11 +882,7 @@ export class KumoAPI {
         // not skip the remaining accessories, and must not escape into socket.io's
         // emit loop.
         for (const callback of this.deviceProfileCallbacks) {
-          try {
-            callback(serial, profile);
-          } catch (e) {
-            this.log.error(`Profile update callback error for ${serial}: ${(e as Error).message}`);
-          }
+          this.safeCall(`Profile update callback error for ${serial}`, () => callback(serial, profile));
         }
       });
 
@@ -979,11 +923,7 @@ export class KumoAPI {
           );
 
           for (const callback of this.sensorUpdateCallbacks) {
-            try {
-              callback(reading);
-            } catch (e) {
-              this.log.error(`Sensor update callback error for ${serial}: ${(e as Error).message}`);
-            }
+            this.safeCall(`Sensor update callback error for ${serial}`, () => callback(reading));
           }
         } catch (e) {
           // A throw here would escape into socket.io's emit loop and could take down
@@ -1221,7 +1161,7 @@ export class KumoAPI {
   /** Ask every subscribed device to re-report indoor-unit status (→ device_update). */
   private nudgeDeviceStatus(): void {
     for (const serial of this.deviceUpdateCallbacks.keys()) {
-      if (serial && typeof serial === 'string' && serial.trim().length > 0) {
+      if (isValidSerial(serial)) {
         this.socket?.emit('force_adapter_request', serial, 'iuStatus');
       }
     }
@@ -1266,11 +1206,19 @@ export class KumoAPI {
    */
   private reportHealth(isHealthy: boolean): void {
     for (const callback of this.streamingHealthCallbacks) {
-      try {
-        callback(isHealthy);
-      } catch (e) {
-        this.log.error(`Streaming health callback error: ${(e as Error).message}`);
-      }
+      this.safeCall('Streaming health callback error', () => callback(isHealthy));
+    }
+  }
+
+  /**
+   * Run one consumer callback, logging instead of throwing. A throw from a Socket.IO
+   * handler escapes into its emit loop, and one consumer must not skip the others.
+   */
+  private safeCall(context: string, fn: () => void): void {
+    try {
+      fn();
+    } catch (e) {
+      this.log.error(`${context}: ${(e as Error).message}`);
     }
   }
 

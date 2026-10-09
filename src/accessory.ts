@@ -5,7 +5,7 @@ import {
   DeviceStatus, DeviceProfile, Zone, Commands, MirrorState, SensorReading,
   FanSpeed, FAN_SPEEDS, VaneDirection, isVaneDirection, normalizeFanSpeed,
 } from './settings';
-import { cToF, quantizeSetpointInRange } from './temperature';
+import { cToF, quantizeSetpointInRange, sameSetpoint } from './temperature';
 
 /**
  * Fan speed <-> HomeKit RotationSpeed, on the Fanv2 service.
@@ -101,7 +101,6 @@ export class KumoThermostatAccessory {
   // own; 20% is the convention Homebridge accessories use.
   private readonly LOW_BATTERY_PCT = 20;
 
-  private hasReceivedValidUpdate: boolean = false;
   private deviceProfile: DeviceProfile | null = null;
   private filterMaintenanceService: Service | null = null;
   private fanOnlyService: Service | null = null;
@@ -686,13 +685,7 @@ export class KumoThermostatAccessory {
       this.platform.log.error(
         `[FAN ONLY] ${this.accessory.displayName}: Failed to set fan-only ${on ? 'ON' : 'OFF'}`,
       );
-      // Revert the switch to the actual device state
-      setTimeout(() => {
-        this.fanOnlyService?.updateCharacteristic(
-          this.platform.Characteristic.On,
-          this.isFanOnlyActive(this.currentStatus),
-        );
-      }, 100);
+      this.revertSoon();
       return;
     }
 
@@ -705,12 +698,6 @@ export class KumoThermostatAccessory {
       this.currentStatus.operationMode = operationMode;
       this.currentStatus.power = on ? 1 : 0;
       this.refreshClimateCharacteristics();
-    }
-
-    // Fan-only and dry are mutually exclusive — engaging fan-only means the
-    // unit is no longer dehumidifying, so flip the dry switch off optimistically.
-    if (this.dryService) {
-      this.dryService.updateCharacteristic(this.platform.Characteristic.On, false);
     }
 
     // Mirror a HomeKit-driven fan-only toggle to any followers immediately.
@@ -797,13 +784,7 @@ export class KumoThermostatAccessory {
       this.platform.log.error(
         `[DRY] ${this.accessory.displayName}: Failed to set dry ${on ? 'ON' : 'OFF'}`,
       );
-      // Revert the switch to the actual device state
-      setTimeout(() => {
-        this.dryService?.updateCharacteristic(
-          this.platform.Characteristic.On,
-          this.isDryActive(this.currentStatus),
-        );
-      }, 100);
+      this.revertSoon();
       return;
     }
 
@@ -819,24 +800,20 @@ export class KumoThermostatAccessory {
       this.refreshClimateCharacteristics();
     }
 
-    // Fan-only and dry are mutually exclusive — engaging dry means the unit is
-    // no longer fan-only, so flip the fan switch off optimistically.
-    if (this.fanOnlyService) {
-      this.fanOnlyService.updateCharacteristic(this.platform.Characteristic.On, false);
-    }
-
     // Mirror a HomeKit-driven dry toggle to any followers immediately.
     this.notifyStatusListeners();
   }
 
   private updateFilterMaintenance(filterDirty: boolean): void {
     if (!this.filterMaintenanceService) {
+      const existing = this.accessory.getService(this.platform.Service.FilterMaintenance);
       this.filterMaintenanceService =
-        this.accessory.getService(this.platform.Service.FilterMaintenance) ||
-        this.accessory.addService(this.platform.Service.FilterMaintenance);
+        existing || this.accessory.addService(this.platform.Service.FilterMaintenance);
       this.linkSecondaryService(this.filterMaintenanceService);
-      this.publishStructureChange();
-      this.platform.log.debug(`Added FilterMaintenance service for ${this.accessory.displayName}`);
+      if (!existing) {
+        this.publishStructureChange();
+        this.platform.log.debug(`Added FilterMaintenance service for ${this.accessory.displayName}`);
+      }
     }
 
     this.filterMaintenanceService.updateCharacteristic(
@@ -1249,7 +1226,6 @@ export class KumoThermostatAccessory {
       };
 
       this.currentStatus = status;
-      this.hasReceivedValidUpdate = true; // Mark that we've received at least one valid complete update
       // Both setpoints, not one "target": on HeaterCooler each threshold is the
       // setpoint for its own mode and the band is live in AUTO, so there is no
       // single target temperature to name.
@@ -1281,7 +1257,7 @@ export class KumoThermostatAccessory {
     if (!this.isReachable()) {
       return;
     }
-    // Update all characteristics
+    // Active, mode state and the Dry / Fan-only switches
     this.refreshClimateCharacteristics();
 
     // Fan and vane ride along with every status update. Both live on the
@@ -1323,22 +1299,6 @@ export class KumoThermostatAccessory {
       this.humidityService?.updateCharacteristic(
         this.platform.Characteristic.CurrentRelativeHumidity,
         status.humidity,
-      );
-    }
-
-    // Keep the fan-only switch in sync with the underlying device mode
-    if (this.fanOnlyService) {
-      this.fanOnlyService.updateCharacteristic(
-        this.platform.Characteristic.On,
-        this.isFanOnlyActive(status),
-      );
-    }
-
-    // Keep the dry switch in sync with the underlying device mode
-    if (this.dryService) {
-      this.dryService.updateCharacteristic(
-        this.platform.Characteristic.On,
-        this.isDryActive(status),
       );
     }
   }
@@ -1497,7 +1457,7 @@ export class KumoThermostatAccessory {
     return (
       this.currentStatus.power === 0 ||
       this.currentStatus.operationMode === 'off' ||
-      Date.now() - this.offRequestedAt < this.OFF_SUPPRESS_WINDOW_MS
+      this.offInFlight()
     );
   }
 
@@ -1575,14 +1535,7 @@ export class KumoThermostatAccessory {
 
     if (!success) {
       this.platform.log.error(`[ACTIVE] ${this.accessory.displayName}: failed to turn ${on ? 'ON' : 'OFF'}`);
-      setTimeout(() => {
-        if (this.currentStatus) {
-          this.service.updateCharacteristic(
-            this.platform.Characteristic.Active,
-            this.mapToActive(this.currentStatus),
-          );
-        }
-      }, 100);
+      this.revertSoon();
       return;
     }
 
@@ -1590,10 +1543,6 @@ export class KumoThermostatAccessory {
       this.currentStatus.operationMode = operationMode;
       this.currentStatus.power = on ? 1 : 0;
       this.refreshClimateCharacteristics();
-    }
-    if (!on) {
-      this.fanOnlyService?.updateCharacteristic(this.platform.Characteristic.On, false);
-      this.dryService?.updateCharacteristic(this.platform.Characteristic.On, false);
     }
     this.notifyStatusListeners();
   }
@@ -1662,14 +1611,7 @@ export class KumoThermostatAccessory {
       this.platform.log.debug(
         `[MODE CHANGE] ${this.accessory.displayName}: an off is in flight — not sending ${operationMode}`,
       );
-      setTimeout(() => {
-        if (this.currentStatus) {
-          this.service.updateCharacteristic(
-            this.platform.Characteristic.TargetHeaterCoolerState,
-            this.mapToTargetHeaterCoolerState(this.currentStatus),
-          );
-        }
-      }, 100);
+      this.revertSoon();
       return;
     }
 
@@ -1687,29 +1629,44 @@ export class KumoThermostatAccessory {
         this.currentStatus.power = 1;
         this.refreshClimateCharacteristics();
       }
-      // Picking a heat/cool/auto mode leaves fan-only and dry inactive.
-      this.fanOnlyService?.updateCharacteristic(this.platform.Characteristic.On, false);
-      this.dryService?.updateCharacteristic(this.platform.Characteristic.On, false);
       this.notifyStatusListeners();
     } else {
       this.platform.log.error(`[MODE CHANGE] ${this.accessory.displayName}: Failed to set mode to ${operationMode}`);
     }
   }
 
-  /** Push Active + both state characteristics from the current cached status. */
+  /**
+   * Push Active, both state characteristics and the Dry / Fan-only switches from
+   * the current cached status. The switches are derived here rather than flipped
+   * by each setter: fan-only and dry are mutually exclusive, and both are off in
+   * heat/cool/auto or when the unit is off.
+   */
   private refreshClimateCharacteristics(): void {
     // Unreachable: the cache is updated, but HomeKit stays in No Response.
     if (!this.currentStatus || !this.isReachable()) {
       return;
     }
+    const C = this.platform.Characteristic;
+    this.service.updateCharacteristic(C.Active, this.mapToActive(this.currentStatus));
     this.service.updateCharacteristic(
-      this.platform.Characteristic.Active, this.mapToActive(this.currentStatus));
+      C.CurrentHeaterCoolerState, this.mapToCurrentHeaterCoolerState(this.currentStatus));
     this.service.updateCharacteristic(
-      this.platform.Characteristic.CurrentHeaterCoolerState,
-      this.mapToCurrentHeaterCoolerState(this.currentStatus));
-    this.service.updateCharacteristic(
-      this.platform.Characteristic.TargetHeaterCoolerState,
-      this.mapToTargetHeaterCoolerState(this.currentStatus));
+      C.TargetHeaterCoolerState, this.mapToTargetHeaterCoolerState(this.currentStatus));
+    this.fanOnlyService?.updateCharacteristic(C.On, this.isFanOnlyActive(this.currentStatus));
+    this.dryService?.updateCharacteristic(C.On, this.isDryActive(this.currentStatus));
+  }
+
+  /**
+   * Put HomeKit back on the cached device state after a write that did not go
+   * through. Deferred because HAP applies the written value after the handler
+   * returns, which would overwrite an immediate revert.
+   */
+  private revertSoon(): void {
+    setTimeout(() => {
+      if (this.currentStatus) {
+        this.publishStatus(this.currentStatus);
+      }
+    }, 100);
   }
 
   // ---- Fanv2: speed, auto/manual, swing -----------------------------------
@@ -1886,12 +1843,7 @@ export class KumoThermostatAccessory {
         'fan cannot run independently, and honouring this would let a room-wide ' +
         '"turn off the fan" shut down the heat pump. Use the climate tile to turn it off.',
       );
-      setTimeout(() => {
-        if (this.currentStatus) {
-          this.fanService?.updateCharacteristic(
-            this.platform.Characteristic.Active, this.mapToActive(this.currentStatus));
-        }
-      }, 100);
+      this.revertSoon();
       return;
     }
     await this.setActive(value);
@@ -2038,7 +1990,11 @@ export class KumoThermostatAccessory {
 
   async setTemperatureDisplayUnits(value: CharacteristicValue): Promise<void> {
     const C = this.platform.Characteristic.TemperatureDisplayUnits;
-    this.accessory.context.displayUnits = value === C.CELSIUS ? 'C' : 'F';
+    const units = value === C.CELSIUS ? 'C' : 'F';
+    if (this.accessory.context.displayUnits === units) {
+      return; // persisting rewrites the whole accessory cache to disk
+    }
+    this.accessory.context.displayUnits = units;
     this.platform.api.updatePlatformAccessories([this.accessory]);
   }
 
@@ -2246,10 +2202,7 @@ export class KumoThermostatAccessory {
 
     const temp = this.currentStatus.roomTemp;
     if (temp === undefined || temp === null || isNaN(temp)) {
-      // Only warn if we've received valid updates before (not during initial state)
-      if (this.hasReceivedValidUpdate) {
-        this.platform.log.warn(`Invalid roomTemp value for ${this.accessory.displayName}:`, temp);
-      }
+      this.platform.log.warn(`Invalid roomTemp value for ${this.accessory.displayName}:`, temp);
       return 20; // Default fallback temperature
     }
 
@@ -2329,10 +2282,9 @@ export class KumoThermostatAccessory {
             return;
           }
           const requested = this.currentStatus?.[field];
-          // Round both to the device's 0.1 resolution before comparing, so IEEE
-          // dirt (22.200001 vs 22.2) is not reported as a disagreement.
-          const differs = typeof requested !== 'number' ||
-            Math.round(actual * 10) !== Math.round(requested * 10);
+          // Compare at the device's 0.1 resolution, so IEEE dirt (22.200001 vs
+          // 22.2) is not reported as a disagreement.
+          const differs = typeof requested !== 'number' || !sameSetpoint(actual, requested);
 
           if (differs) {
             this.platform.log.info(
@@ -2395,9 +2347,8 @@ export class KumoThermostatAccessory {
       ? this.platform.Characteristic.HeatingThresholdTemperature
       : this.platform.Characteristic.CoolingThresholdTemperature;
     const label = field === 'spHeat' ? 'AUTO HEAT SP' : 'AUTO COOL SP';
-    const fallback = field === 'spHeat' ? 20 : 24;
 
-    const tempF = (temp * 9 / 5) + 32;
+    const tempF = cToF(temp);
     this.platform.log.info(
       `[${label}] ${this.accessory.displayName}: HomeKit sent ${temp.toFixed(1)}°C (${tempF.toFixed(1)}°F)`,
     );
@@ -2453,10 +2404,7 @@ export class KumoThermostatAccessory {
       this.notifyStatusListeners();
     } else {
       this.platform.log.error(`[${label}] ${this.accessory.displayName}: Failed to set ${field} to ${temp}`);
-      // Revert the handle to the actual device state
-      setTimeout(() => {
-        this.service.updateCharacteristic(characteristic, this.getThresholdTemperature(field, fallback));
-      }, 100);
+      this.revertSoon();
     }
   }
 
@@ -2494,7 +2442,7 @@ export class KumoThermostatAccessory {
       return 'off';
     }
     const m = desired.operationMode;
-    if (m.startsWith('auto')) {
+    if (this.isAutoMode(m)) {
       return 'auto';
     }
     if (m === 'heat' || m === 'cool' || m === 'dry' || m === 'vent') {
@@ -2520,55 +2468,35 @@ export class KumoThermostatAccessory {
       return;
     }
 
-    const commands: Commands = {};
+    const commands: Commands = { operationMode: mode };
     const fan = desired.fanSpeed;
+    if (mode !== 'off' && fan) {
+      commands.fanSpeedRaw = fan;
+    }
     switch (mode) {
-      case 'off':
-        commands.operationMode = 'off';
-        break;
       case 'heat':
-        commands.operationMode = 'heat';
         commands.spHeat = this.clampSetpoint(desired.spHeat, 'heat');
-        if (fan) {
-          commands.fanSpeedRaw = fan;
-        }
         break;
       case 'cool':
-        commands.operationMode = 'cool';
         commands.spCool = this.clampSetpoint(desired.spCool, 'cool');
-        if (fan) {
-          commands.fanSpeedRaw = fan;
-        }
         break;
       case 'auto':
-        commands.operationMode = 'auto';
         commands.spHeat = this.clampSetpoint(desired.spHeat, 'auto');
         commands.spCool = this.clampSetpoint(desired.spCool, 'auto');
-        if (fan) {
-          commands.fanSpeedRaw = fan;
-        }
         break;
       case 'dry':
-        commands.operationMode = 'dry';
         commands.power = 1;
         if (this.dryUsesSetpoint()) {
           commands.spCool = this.clampSetpoint(desired.spCool, 'cool');
         }
-        if (fan) {
-          commands.fanSpeedRaw = fan;
-        }
         break;
       case 'vent':
-        commands.operationMode = 'vent';
         commands.power = 1;
-        if (fan) {
-          commands.fanSpeedRaw = fan;
-        }
         break;
     }
 
     this.platform.log.info(`[MIRROR] ${this.accessory.displayName}: applying ${JSON.stringify(commands)}`);
-    this.noteModeIntent(commands.operationMode!);
+    this.noteModeIntent(mode);
 
     const success = await this.sendDeviceCommand(commands);
     if (!success) {
@@ -2579,8 +2507,8 @@ export class KumoThermostatAccessory {
     // Optimistic echo so the tile reflects the mirror immediately; the next poll
     // reconciles authoritatively.
     if (this.currentStatus) {
-      this.currentStatus.operationMode = commands.operationMode!;
-      this.currentStatus.power = commands.operationMode === 'off' ? 0 : 1;
+      this.currentStatus.operationMode = mode;
+      this.currentStatus.power = mode === 'off' ? 0 : 1;
       if (commands.spHeat !== undefined) {
         this.currentStatus.spHeat = commands.spHeat;
       }
@@ -2604,18 +2532,6 @@ export class KumoThermostatAccessory {
       }
       if (fan) {
         this.syncFanCharacteristics(fan);
-      }
-      if (this.dryService) {
-        this.dryService.updateCharacteristic(
-          this.platform.Characteristic.On,
-          this.isDryActive(this.currentStatus),
-        );
-      }
-      if (this.fanOnlyService) {
-        this.fanOnlyService.updateCharacteristic(
-          this.platform.Characteristic.On,
-          this.isFanOnlyActive(this.currentStatus),
-        );
       }
     }
   }

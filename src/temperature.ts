@@ -131,10 +131,10 @@ export function quantizeSetpointInRange(c: number, min: number, max: number): nu
 /**
  * True if two Celsius setpoints are the same to within half a 0.1°C step.
  *
- * Used to decide whether a write is a real change. Values that came out of
- * quantizeSetpointC are at least 0.5°C apart when they differ (1°F ≈ 0.556°C), so the
- * exact-0.05 boundary is unreachable in practice — do not rely on which side it
- * falls, floats put |22.25 - 22.2| at 0.05000000000000071.
+ * Used to compare a reconciled device setpoint with the one we sent. Values that
+ * came out of quantizeSetpointC are at least 0.5°C apart when they differ (1°F ≈
+ * 0.556°C), so the exact-0.05 boundary is unreachable in practice — do not rely on
+ * which side it falls, floats put |22.25 - 22.2| at 0.05000000000000071.
  */
 export function sameSetpoint(a: number, b: number): boolean {
   return Math.abs(a - b) < SETPOINT_TOLERANCE_C;

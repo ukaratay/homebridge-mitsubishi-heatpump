@@ -303,16 +303,8 @@ export class LocalKumoClient {
     this.creds.set(serial, creds);
   }
 
-  clearCreds(serial: string): void {
-    this.creds.delete(serial);
-  }
-
   hasLocal(serial: string): boolean {
     return this.creds.has(serial);
-  }
-
-  getIp(serial: string): string | undefined {
-    return this.creds.get(serial)?.ip;
   }
 
   /** Run `fn` after any in-flight request for this serial completes (per-device mutex). */

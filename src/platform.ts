@@ -82,6 +82,7 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
   private readonly sitePollers: Map<string, NodeJS.Timeout> = new Map();
   private readonly siteAccessories: Map<string, KumoThermostatAccessory[]> = new Map();
   private readonly degradedPollInterval: number;
+  private readonly normalPollInterval: number;
   private isStreamingHealthy: boolean = false;
   private isDegradedMode: boolean = false;
 
@@ -106,7 +107,6 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
   // Hysteresis for mode switching - prevents rapid oscillation on flaky connections
   private readonly modeChangeHysteresisMs: number = 10000; // 10 second stability required
   private pendingModeChange: NodeJS.Timeout | null = null;
-  private pendingModeHealthy: boolean | null = null;
 
   // Discovery retry — self-heals from transient startup failures (e.g. DNS/login blips)
   private discoveryRetryTimer: NodeJS.Timeout | null = null;
@@ -127,6 +127,7 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
 
     // Configure degraded mode polling interval
     this.degradedPollInterval = (kumoConfig.degradedPollInterval || 10) * 1000;
+    this.normalPollInterval = (kumoConfig.pollInterval || 30) * 1000;
     this.log.debug(`Degraded polling interval: ${this.degradedPollInterval / 1000}s`);
 
     // Assigned before the bail-out below because `strict` requires every readonly field to
@@ -192,11 +193,7 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
     }
 
     // Clean up all site pollers
-    for (const [siteId, timer] of this.sitePollers) {
-      clearInterval(timer);
-      this.log.debug(`Stopped site poller for ${siteId}`);
-    }
-    this.sitePollers.clear();
+    this.stopAllPollers();
 
     // Clean up all accessory handlers
     for (const handler of this.accessoryHandlers) {
@@ -271,7 +268,7 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
 
       this.log.info(`Found ${sites.length} site(s)`);
 
-      const discoveredDevices: Array<{ uuid: string; displayName: string; deviceSerial: string; zoneName: string }> = [];
+      const discoveredDevices: Array<{ uuid: string; displayName: string; deviceSerial: string }> = [];
 
       // For each site, get zones
       for (const site of sites) {
@@ -300,7 +297,6 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
             uuid,
             displayName,
             deviceSerial,
-            zoneName: zone.name,
           });
 
           this.log.info(`Discovered device: ${displayName} (${deviceSerial})`);
@@ -320,7 +316,6 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
             this.log.info('Restoring existing accessory from cache:', existingAccessory.displayName);
             existingAccessory.context.device = {
               deviceSerial,
-              zoneName: zone.name,
               displayName,
               siteId: site.id,
             };
@@ -339,7 +334,6 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
 
             accessory.context.device = {
               deviceSerial,
-              zoneName: zone.name,
               displayName,
               siteId: site.id,
             };
@@ -409,7 +403,7 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
         this.log.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
         this.log.info(`Streaming: ${streamingStarted ? 'ENABLED' : 'DISABLED'}`);
         this.log.info(`Polling mode: ${this.kumoConfig.disablePolling ? 'On-demand only' : 'Enabled'}`);
-        this.log.info(`Normal poll interval: ${(this.kumoConfig.pollInterval || 30)}s`);
+        this.log.info(`Normal poll interval: ${this.normalPollInterval / 1000}s`);
         this.log.info(`Degraded poll interval: ${this.degradedPollInterval / 1000}s`);
         this.log.info(`Health check interval: ${healthCheckInterval}s`);
         this.log.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
@@ -434,14 +428,11 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
 
       // Start site-level polling based on configuration and streaming health
       if (!this.kumoConfig.disablePolling) {
-        const uniqueSites = new Set(discoveredDevices.map(d =>
-          this.accessories.find(a => a.UUID === d.uuid)?.context.device.siteId
-        ).filter(Boolean));
+        const siteIds = this.siteIds();
+        this.log.info(`Initializing pollers for ${siteIds.length} site(s)`);
 
-        this.log.info(`Initializing pollers for ${uniqueSites.size} site(s)`);
-
-        for (const siteId of uniqueSites) {
-          this.startSitePoller(siteId as string);
+        for (const siteId of siteIds) {
+          this.startSitePoller(siteId);
         }
       } else {
         this.log.info('Polling disabled - will activate only if streaming fails');
@@ -771,7 +762,7 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
       return;
     }
 
-    const interval = this.isDegradedMode ? this.degradedPollInterval : (this.kumoConfig.pollInterval || 30) * 1000;
+    const interval = this.currentPollInterval();
     const intervalSec = interval / 1000;
     const mode = this.isDegradedMode ? 'DEGRADED' : 'NORMAL';
 
@@ -850,7 +841,6 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
       if (this.pendingModeChange) {
         clearTimeout(this.pendingModeChange);
         this.pendingModeChange = null;
-        this.pendingModeHealthy = null;
         this.log.debug('Cancelled pending mode change due to new disconnect');
       }
 
@@ -863,24 +853,17 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
     // If streaming became healthy, schedule exit from degraded mode WITH HYSTERESIS
     // (Wait for stable connection before stopping polling fallback)
     if (!wasHealthy && isHealthy) {
-      // If already pending the same mode change, do nothing
-      if (this.pendingModeHealthy === true) {
+      // The only pending change is an exit to healthy, so one pending means this one.
+      if (this.pendingModeChange) {
         this.log.debug('Mode change to healthy already pending, waiting for stability...');
         return;
       }
 
-      // Cancel any conflicting pending mode change
-      if (this.pendingModeChange) {
-        clearTimeout(this.pendingModeChange);
-      }
-
-      this.pendingModeHealthy = true;
       const hysteresisSec = this.modeChangeHysteresisMs / 1000;
       this.log.info(`Streaming reconnected - waiting ${hysteresisSec}s for stable connection...`);
 
       this.pendingModeChange = setTimeout(() => {
         this.pendingModeChange = null;
-        this.pendingModeHealthy = null;
 
         // Double-check health is still good before switching
         if (this.isStreamingHealthy) {
@@ -917,7 +900,7 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
 
     // Start (or speed up) a poller for every site. Under `disablePolling: true` none
     // exist yet, so this is the only place they are ever created.
-    this.restartAllPollers(this.degradedPollInterval);
+    this.restartAllPollers();
   }
 
   /**
@@ -938,12 +921,10 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
       this.stopAllPollers();
     } else {
       // Otherwise restart with normal interval
-      const normalInterval = (this.kumoConfig.pollInterval || 30) * 1000;
-      const normalSec = normalInterval / 1000;
       this.log.info('→ Returning to NORMAL MODE');
-      this.log.info(`→ Polling reduced to ${normalSec}s intervals`);
+      this.log.info(`→ Polling reduced to ${this.normalPollInterval / 1000}s intervals`);
       this.log.info('→ Primary updates via streaming');
-      this.restartAllPollers(normalInterval);
+      this.restartAllPollers();
     }
   }
 
@@ -952,45 +933,34 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
     return [...new Set(this.accessoryHandlers.map(handler => handler.getSiteId()).filter(Boolean))];
   }
 
+  /** The poll interval for the current mode, in ms. */
+  private currentPollInterval(): number {
+    return this.isDegradedMode ? this.degradedPollInterval : this.normalPollInterval;
+  }
+
   /**
-   * Bring every site's poller up at `intervalMs`, starting the ones that do not
-   * exist yet.
+   * Bring every site's poller up at the current mode's interval, starting the ones
+   * that do not exist yet.
    *
    * Starting the missing ones is what makes the degraded-mode fallback real. Under
    * the recommended `disablePolling: true`, discovery never calls startSitePoller,
    * so this map is empty when streaming fails: a "restart all" restarted nothing
    * while logging "0 site poller(s) active", and the fallback polled nothing at all.
    */
-  private restartAllPollers(intervalMs: number): void {
-    const intervalSec = intervalMs / 1000;
-
+  private restartAllPollers(): void {
     for (const siteId of this.siteIds()) {
       const timer = this.sitePollers.get(siteId);
-
-      // startSitePoller derives its interval from isDegradedMode, which both callers
-      // set before calling us, so a site started here comes up at intervalMs too. It
-      // also does its own immediate poll and groups the site's accessories.
-      if (!timer) {
-        this.startSitePoller(siteId);
-        continue;
+      if (timer) {
+        clearInterval(timer);
+        this.sitePollers.delete(siteId);
       }
-
-      clearInterval(timer);
-
-      // Do immediate poll
-      this.pollSite(siteId);
-
-      // Start new interval
-      const newTimer = setInterval(() => {
-        this.pollSite(siteId);
-      }, intervalMs);
-
-      this.sitePollers.set(siteId, newTimer);
-      this.log.debug(`Poller restarted for site ${siteId}: ${intervalSec}s interval`);
+      // startSitePoller derives its interval from isDegradedMode, which both callers
+      // set before calling us. It also does its own immediate poll and groups the
+      // site's accessories.
+      this.startSitePoller(siteId);
     }
 
-    const siteCount = this.sitePollers.size;
-    this.log.info(`✓ ${siteCount} site poller(s) active at ${intervalSec}s intervals`);
+    this.log.info(`✓ ${this.sitePollers.size} site poller(s) active at ${this.currentPollInterval() / 1000}s intervals`);
   }
 
   /**
