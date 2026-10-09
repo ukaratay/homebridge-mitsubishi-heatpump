@@ -9,7 +9,7 @@
 // client for the whole class, so the request line, the framing headers, the retry
 // and the one-socket-per-exchange discipline were all unasserted. Swapping the
 // transport with that hole open would have been a blind change — and local control
-// is vendor-blocked right now (see CLAUDE.md), so there is no hardware to catch it.
+// is vendor-blocked right now (see AGENTS.md), so there is no hardware to catch it.
 //
 // `creds.ip` carries `127.0.0.1:<port>` throughout. The transport builds
 // `http://${ip}/api?m=${token}` and lets the URL parser split host from port, so an
