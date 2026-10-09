@@ -6,6 +6,12 @@ Entries at 1.8.2 and below are inherited from
 [homebridge-mitsubishi-comfort](https://github.com/burtherman/homebridge-mitsubishi-comfort),
 the upstream project this was forked from.
 
+- **2.2.2** - A mode-switching scene no longer gets overridden by its own Active=ON (October 2026)
+  - **The bug:** a HomeKit scene that switches a running unit from one mode to another (say, a morning scene from COOL to HEAT) captures the whole tile, so it sends `TargetHeaterCoolerState=HEAT` *and* `Active=ON`, concurrently and in either order. `setActive` answered every ON by re-sending the mode the unit was last in, and the cache still said `cool` because the HEAT write had not landed yet. Each unit got one `heat` and two `cool` commands (the live log shows two ONs per unit per scene) with nothing ordering them, so whichever reached the cloud last won. Seen live: a 6:30 AM HEAT scene left units in the COOL that the evening scene had set. A successful stale ON also pushed `COOL` back into the Home app, so the tile could show Cool even on a morning the unit did switch
+  - **The fix:** `Active=ON` for a unit that is already running is a no-op. An off still in flight lets the ON through, because the cache has not caught up with the off yet
+  - **Not covered:** a scene that turns on a unit that is *off* and picks a mode in the same burst still sends both the power-on (in the default `auto`) and the requested mode. That path is unchanged
+  - `test/on-scene-mode-race.test.ts` pins both dispatch orders and the off-in-flight control. Both race cases fail against 2.2.1. 276 tests pass
+
 - **2.2.1** - Verified by Homebridge (August 2026)
   - **No functional change.** The compiled output is byte-identical to 2.2.0: a fresh `npm run build` of this commit's `src/` reproduces the `dist/` inside the published 2.2.0 tarball exactly, file for file. Nothing under `src/` has moved since that release
   - **Verified by the Homebridge project team on 2026-08-04** ([homebridge/plugins#1151](https://github.com/homebridge/plugins/issues/1151)). The plugin is listed in `verified-plugins.json`, which is what turns on the green verified shield in the Homebridge UI, bumps the plugin up its plugin search, and opts every release into the project's pre-bundled tarball installs. The README carries the badge now, and putting it on the npm page as well is the whole reason this version exists: npm serves a registry-level `readme` field and that field only refreshes on publish

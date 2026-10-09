@@ -1,6 +1,6 @@
 {
   "name": "homebridge-mitsubishi-heatpump",
-  "version": "2.2.1",
+  "version": "2.2.2",
   "description": "Homebridge plugin for Mitsubishi ductless heat pumps (MLZ/MSZ) over the Mitsubishi Comfort v3 API, with local LAN control, fan speed and vane control",
   "author": "Durmus Karatay",
   "main": "dist/index.js",
