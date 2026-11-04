@@ -59,6 +59,17 @@ cloud reports them read-only and enforces them — a write outside the range ret
 with `{"error":{"<serial>":{"commands":["invalidSpHeatRange"]}}}`. No API can change
 them.
 
+### Command validation
+
+- **Setpoints must be multiples of 0.5 °C** since 2026-10-30 (0.1 °C was accepted until
+  2026-10-29). Anything else returns 400 `{"error":{"commands":"invalidSpHeatIncrement"}}`
+  or `invalidSpCoolIncrement`. Live check 2026-11-04: 21.0 and 21.5 accepted, 21.3 and
+  22.7 refused. Units still report older 0.1 °C values; only writes are checked.
+- **Any command to an off unit that carries no `operationMode` is refused**, fan speed
+  and vane included: 400 `{"error":{"<serial>":{"commands":["modeRequiredWhenDeviceOff"]}}}`.
+  Seen live 2026-11-01 and 2026-11-04. (Over the LAN, which no longer authenticates, the
+  same writes were accepted on 2026-07-27.)
+
 ## Socket.IO
 
 `https://socket-prod.kumocloud.com` (`SOCKET_BASE_URL`), upgraded to `wss://` by
@@ -74,7 +85,9 @@ socket.io. Streaming is the primary update path; cloud polling is the fallback.
 | `device_status_v2('')` and `device_status_v2(serial)` | Request connection status |
 
 `force_adapter_request` and `device_status_v2` are sent on the initial connection and after
-a zombie-stream reconnect, not on routine (token-refresh) reconnects. While the stream is
+a zombie-stream reconnect, not on routine (token-refresh) reconnects. While a unit is
+marked disconnected, `device_status_v2(serial)` is re-sent once a minute: the cloud pushes
+a disconnect but not reliably the reconnect, and answers a direct request within a second. While the stream is
 connected but `device_update` has been silent for 5 minutes, one
 `force_adapter_request(serial, 'iuStatus')` per device asks for status; if no device
 answers within 2.5 minutes, the stream is reconnected.
@@ -150,7 +163,9 @@ carries `hasHotAdjust`, `hasInitialSettings`, `hasModeTest` and `extendedTemps`.
 roomTempDisplayOffset }`, and formerly `password`. **Strip before logging.**
 
 `device_status_v2` — `{ deviceSerial, status, lastTimeConnected, lastDisconnectedReason }`;
-`status` is `"connected"` or `"disconnected"`.
+`status` is `"connected"` or `"disconnected"`. A `"disconnected"` push with reason
+`WEBSOCKET_CLOSED` for every unit at once has followed the plugin's own stream reconnects
+(nine times, 2026-10-29 to 2026-11-02) while the units kept taking commands.
 
 `acoil_update` — `{ deviceSerial, date }`. That is all of it.
 
