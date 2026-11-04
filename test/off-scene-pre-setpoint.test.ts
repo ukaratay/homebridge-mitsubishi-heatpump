@@ -31,10 +31,8 @@
 // Setpoint values are quantized onto the whole-°F grid before sending
 // (src/temperature.ts), so the expected command values below are the quantized
 // ones, not the raw request. Each is derived in-line where it matters. The last
-// step of that derivation is a CEILING to the 0.1°C the device stores, not a
-// round: the Mitsubishi Comfort app truncates °C→°F where the Home app rounds,
-// and only the ceiling reads back as the intended degree under both (measured
-// live 2026-07-27, see storedC in src/temperature.ts).
+// step of that derivation is the nearest 0.5°C, the only grid the Mitsubishi
+// cloud accepts (see storedC in src/temperature.ts).
 
 import test from 'node:test';
 import assert from 'node:assert';
@@ -148,9 +146,9 @@ test('control: a setpoint with no off in the burst still sends', async () => {
 
   assert.strictEqual(sendCommandCalls.length, 1);
   // 23.5°C = 74.3°F -> nearest whole °F is 74 -> (74-32)*5/9 = 23.333…°C -> the
-  // ceiling of that at 0.1°C resolution is 23.4. The value on the wire is the
+  // nearest 0.5°C to that is 23.5. The value on the wire is the
   // quantized one; the hold must not change that.
-  assert.deepStrictEqual(sendCommandCalls[0].commands, { spCool: 23.4 });
+  assert.deepStrictEqual(sendCommandCalls[0].commands, { spCool: 23.5 });
 });
 
 test('a drag sends only its final value', async () => {
@@ -164,10 +162,10 @@ test('a drag sends only its final value', async () => {
   ]);
 
   assert.strictEqual(sendCommandCalls.length, 1, 'intermediate drag values are superseded');
-  // 24°C = 75.2°F -> 75°F -> (75-32)*5/9 = 23.888… -> 23.9. The three raw values
-  // quantize to three distinct grid points (22.8 / 23.4 / 23.9), so this really is
+  // 24°C = 75.2°F -> 75°F -> (75-32)*5/9 = 23.888… -> 24.0. The three raw values
+  // quantize to three distinct grid points (23.0 / 23.5 / 24.0), so this really is
   // a drag and not one value repeated: only the last generation may survive.
-  assert.deepStrictEqual(sendCommandCalls[0].commands, { spCool: 23.9 });
+  assert.deepStrictEqual(sendCommandCalls[0].commands, { spCool: 24 });
 });
 
 test('the two AUTO handles do not supersede each other', async () => {

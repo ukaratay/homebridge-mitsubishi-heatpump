@@ -19,8 +19,8 @@ liability for damage or loss arising from it.
 - **Fan speed on the tile** — five real speeds plus fan-auto, on a linked Fan service.
 - **Vane control** — swing on the main tile, discrete tilt angles through an opt-in
   `Slats` service.
-- **Fahrenheit-anchored setpoints.** Every setpoint is stored as the exact Celsius of a
-  whole °F, so the Home app and the Comfort app show the same number.
+- **Fahrenheit-anchored setpoints.** Every setpoint is stored as the 0.5°C step nearest
+  a whole °F, so the Home app shows back the degree you set.
 - **Wireless sensor support.** Units with a paired sensor report its finer temperature
   and humidity, plus battery level with a low-battery warning.
 - **Real-time streaming** over Socket.IO, with adaptive polling that starts only when
@@ -155,11 +155,12 @@ HomeKit stores temperatures in Celsius and converts for display. The Home app **
 that conversion while the Comfort app **truncates** it, so the same stored value can read
 72°F in one and 71°F in the other.
 
-**Setpoints: solved.** The units accept 0.1°C granularity, so every setpoint you write is
-snapped to the Celsius that displays as the whole °F you asked for under *both* renderers
-— the ceiling of the exact conversion, not the nearest 0.1. The two apps agree by
-construction. This applies to new changes only; a setpoint you have not touched keeps
-whatever value it was last set to.
+**Setpoints: right in the Home app.** Since late October 2026 the Mitsubishi cloud accepts
+setpoints only in 0.5°C steps and refuses anything else. Every setpoint you write is
+snapped to the 0.5°C step nearest the whole °F you asked for, which the Home app always
+shows as that degree. About half the degrees land just below their °F (72°F is stored as
+22.0°C = 71.6°F), and the Comfort app, which truncates, shows those one degree low. No
+0.5°C value reads correctly in both apps for those degrees.
 
 **Current temperature: partly.** Indoor units report measured room temperature in 0.5°C
 steps, a hardware limit, so the displayed value can still differ by ~1°F between apps. A

@@ -31,9 +31,8 @@
 // path and a controller can write any float inbound. So the value asserted below
 // is the quantized one, not the one HomeKit sent. The first write test spells the
 // arithmetic out; the rest call `quantizeSetpointC` for the expectation, because
-// hand-copied arithmetic rots — two of the comments here had drifted a whole
-// 0.1°C step behind the quantizer (they described rounding, and it takes the
-// CEILING so a truncating renderer shows the same degree). The mirror path is
+// hand-copied arithmetic rots — comments here have drifted behind the quantizer
+// before. The mirror path is
 // deliberately exempt — it copies a value the source already quantized.
 
 import test from 'node:test';
@@ -114,8 +113,8 @@ test('setting the dry-mode setpoint sends spCool, not spHeat', async () => {
   assert.strictEqual(sendCommandCalls.length, 1, 'a command is sent in dry mode');
   // Before the fix this was { spHeat: ... }, which the unit ignored / 400'd.
   // The one worked example: 24°C = 75.2°F -> nearest whole 75°F -> 23.888…°C ->
-  // ceiled to the 0.1°C the device stores = 23.9.
-  assert.deepStrictEqual(sendCommandCalls[0].commands, { spCool: 23.9 },
+  // nearest 0.5°C, the grid the cloud accepts = 24.0.
+  assert.deepStrictEqual(sendCommandCalls[0].commands, { spCool: 24 },
     'dry-mode setpoint is written to spCool (no spHeat, no operationMode)');
 });
 

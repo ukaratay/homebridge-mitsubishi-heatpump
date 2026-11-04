@@ -241,11 +241,11 @@ export class KumoThermostatAccessory {
     // around — the second writer simply does not exist any more.
     //
     // minStep stays 0.1 because the grid is Fahrenheit-anchored, not Celsius:
-    // every write is snapped to the exact Celsius of a whole °F by
-    // quantizeSetpointInRange (see src/temperature.ts). A 0.5°C step would force
-    // 72°F to 22.5°C, which reads back as 72.5°F and shows as 73°F in the
-    // Mitsubishi app. Note HAP applies minStep only on the outbound path, so the
-    // quantizer — not this prop — is what actually holds the grid.
+    // every write is snapped to the 0.5°C point nearest a whole °F by
+    // quantizeSetpointInRange (see src/temperature.ts). A 0.5°C minStep would let
+    // the Home slider offer half-degree Celsius steps that are not whole °F. Note
+    // HAP applies minStep only on the outbound path, so the quantizer — not this
+    // prop — is what actually holds the grid.
     const wideThresholdProps = { minValue: 10, maxValue: 35, minStep: 0.1 };
     this.service.getCharacteristic(this.platform.Characteristic.HeatingThresholdTemperature)
       .setProps(wideThresholdProps)
@@ -2306,8 +2306,8 @@ export class KumoThermostatAccessory {
             return;
           }
           const requested = this.currentStatus?.[field];
-          // Compare at the device's 0.1 resolution, so IEEE dirt (22.200001 vs
-          // 22.2) is not reported as a disagreement.
+          // Compare within half a grid step, so IEEE dirt (22.200001 vs 22.2) is
+          // not reported as a disagreement.
           const differs = typeof requested !== 'number' || !sameSetpoint(actual, requested);
 
           if (differs) {

@@ -294,12 +294,12 @@ test('the filter indication survives a poll as well', async () => {
 // payload the two transports shape differently (the LAN body drops `power`), so
 // it is where a routing mistake actually costs something.
 //
-// 22°C arrives on the wire as 22.2: setpoints are snapped to the Fahrenheit grid
+// 22°C arrives on the wire as 22.0: setpoints are snapped to the Fahrenheit grid
 // before sending (quantizeSetpointInRange). 22°C = 71.6°F -> nearest whole °F is
-// 72 -> back to Celsius at the 0.1°C device resolution = 22.3. Whichever
+// 72 -> 22.222…°C -> nearest 0.5°C, the grid the cloud accepts, = 22.0. Whichever
 // transport carries the write, it carries the same quantized value — the point of
 // quantizing above the transport layer rather than inside it.
-const QUANTIZED_22 = 22.3;
+const QUANTIZED_22 = 22;
 
 test('commands prefer the local path when a unit is locally reachable', async () => {
   const local = makeLocalClient();
