@@ -164,6 +164,21 @@ export class KumoThermostatAccessory {
   private activeWriteGen = 0;
   private readonly ACTIVE_ON_HOLD_MS = 1500;
 
+  // Setpoint, fan and vane writes that could not go out because the unit was off
+  // or being turned off. The cloud refuses any command without a mode to an off
+  // unit (`modeRequiredWhenDeviceOff`), so a scene that turns a unit on and sets
+  // it up lost every write that arrived before the turn-on landed: seen live
+  // 2026-11-04, the Garage came on in HEAT at its old 72.5°F instead of the
+  // scene's 68°F. When the mode picker or Active=ON turns the unit on, what the
+  // same burst stashed here goes right after it (flushOffStash); the Dry and
+  // Fan-only switches do not flush. Only values HomeKit wrote, which
+  // are already on the setpoint grid, are ever stashed. Older than OFF_STASH_MS,
+  // the stash belongs to no burst and is dropped, so a slider moved on an idle
+  // unit still does not apply on a later, unrelated turn-on.
+  private offStash: Commands = {};
+  private offStashAt = 0;
+  private readonly OFF_STASH_MS = 5000;
+
   // How long after an accepted setpoint write to re-read the unit and publish what
   // it actually stored. Long enough for the adapter to apply the write and answer
   // a fresh read; short enough that the tile settles while the user is still there.
@@ -1452,12 +1467,10 @@ export class KumoThermostatAccessory {
    * True only while a HomeKit "off" is in flight — the concurrent scene burst.
    *
    * Distinct from shouldSuppressSetpoint(), which is ALSO true for a unit that
-   * has simply been off for a while. That distinction matters for fan speed and
-   * vane: both are stored preferences it is perfectly reasonable to set on an
-   * idle unit ("set every fan to quiet"), and neither revives it — verified live
-   * 2026-07-27 by writing all six speeds and all seven vane positions to the
-   * powered-off Garage, which reported mode=off throughout. What must still be
-   * blocked is a command trailing an off inside the same scene burst.
+   * has simply been off for a while. That distinction matters for the writes
+   * that turn a unit on (a mode, Dry, Fan-only, a fan-tile ON): on an idle unit
+   * they are how a user turns it back on, but they must not trail an off inside
+   * the same scene burst.
    */
   private offInFlight(): boolean {
     return Date.now() - this.offRequestedAt < this.OFF_SUPPRESS_WINDOW_MS;
@@ -1478,6 +1491,53 @@ export class KumoThermostatAccessory {
       this.currentStatus.operationMode === 'off' ||
       this.offInFlight()
     );
+  }
+
+  /** Keep a write the off unit cannot take, for a turn-on in the same burst. See offStash. */
+  private stashWhileOff(commands: Commands): void {
+    const now = Date.now();
+    if (now - this.offStashAt >= this.OFF_STASH_MS) {
+      this.offStash = {};
+    }
+    Object.assign(this.offStash, commands);
+    this.offStashAt = now;
+  }
+
+  /** After a write that turned the unit on, send what the same burst stashed. See offStash. */
+  private async flushOffStash(): Promise<void> {
+    const stash = this.offStash;
+    const fresh = Date.now() - this.offStashAt < this.OFF_STASH_MS;
+    this.offStash = {};
+    if (!fresh || Object.keys(stash).length === 0) {
+      return;
+    }
+
+    this.platform.log.info(
+      `[TURN ON] ${this.accessory.displayName}: sending ${JSON.stringify(stash)} held while the unit was off`,
+    );
+    const success = await this.sendDeviceCommand(stash);
+    if (!success) {
+      this.platform.log.error(`[TURN ON] ${this.accessory.displayName}: failed to send the held settings`);
+      this.revertSoon();
+      return;
+    }
+
+    if (this.currentStatus) {
+      if (stash.spHeat !== undefined) {
+        this.currentStatus.spHeat = stash.spHeat;
+      }
+      if (stash.spCool !== undefined) {
+        this.currentStatus.spCool = stash.spCool;
+      }
+      if (stash.fanSpeed !== undefined) {
+        this.currentStatus.fanSpeed = stash.fanSpeed;
+      }
+      if (stash.vaneDir !== undefined) {
+        this.currentStatus.airDirection = stash.vaneDir;
+      }
+      this.publishStatus(this.currentStatus);
+    }
+    this.notifyStatusListeners();
   }
 
   // ---- HeaterCooler: Active (on/off) --------------------------------------
@@ -1564,6 +1624,9 @@ export class KumoThermostatAccessory {
       this.refreshClimateCharacteristics();
     }
     this.notifyStatusListeners();
+    if (on) {
+      await this.flushOffStash();
+    }
   }
 
   /** Collapse a reported mode (autoHeat/autoCool) to one the API accepts on send. */
@@ -1649,6 +1712,7 @@ export class KumoThermostatAccessory {
         this.refreshClimateCharacteristics();
       }
       this.notifyStatusListeners();
+      await this.flushOffStash();
     } else {
       this.platform.log.error(`[MODE CHANGE] ${this.accessory.displayName}: Failed to set mode to ${operationMode}`);
     }
@@ -1865,6 +1929,19 @@ export class KumoThermostatAccessory {
       this.revertSoon();
       return;
     }
+    // A scene captures the fan tile beside the climate tile, so an "AC off" scene
+    // can carry the fan's Active=ON next to the climate OFF. Seen live 2026-11-04:
+    // Evening Temps holds Garage climate OFF + fan ON, and the ON cleared the
+    // off-in-flight window, letting the scene's HEAT through, so the Garage came
+    // on every evening. The climate tile is the on/off control; a fan ON never
+    // overrides its off.
+    if (this.offInFlight()) {
+      this.platform.log.info(
+        `[FAN] ${this.accessory.displayName}: ignoring a fan-tile ON that trails an off in the same scene`,
+      );
+      this.revertSoon();
+      return;
+    }
     await this.setActive(value);
   }
 
@@ -1948,13 +2025,16 @@ export class KumoThermostatAccessory {
 
   /** Send a fan speed and reconcile the fan characteristics. */
   private async writeFanSpeed(fanSpeed: FanSpeed): Promise<void> {
-    // Guarded on offInFlight(), NOT shouldSuppressSetpoint(): a fan write is fine
-    // on a unit that is merely off (it is a stored preference and does not revive
-    // it), but must not trail an off inside a scene burst.
-    if (this.offInFlight()) {
+    // An off unit cannot take a fan speed: the cloud refuses any command without a
+    // mode with `modeRequiredWhenDeviceOff` (seen live 2026-11-01 and 2026-11-04;
+    // the LAN accepted it in 2026-07). Held for a turn-on in the same burst
+    // instead, and never sent behind an off in flight. See offStash.
+    if (this.shouldSuppressSetpoint()) {
       this.platform.log.debug(
-        `[FAN SPEED] ${this.accessory.displayName}: an off is in flight — not sending`,
+        `[FAN SPEED] ${this.accessory.displayName}: unit is off / turning off — holding "${fanSpeed}"`,
       );
+      this.stashWhileOff({ fanSpeed });
+      this.revertSoon();
       return;
     }
 
@@ -2082,12 +2162,13 @@ export class KumoThermostatAccessory {
       return false;
     }
 
-    // Same rule as fan speed: allowed on an idle unit, blocked while an off is
-    // in flight so it cannot trail an off in a scene burst.
-    if (this.offInFlight()) {
+    // Same rule as fan speed: an off unit refuses it, so it is held for a turn-on
+    // in the same burst. See offStash.
+    if (this.shouldSuppressSetpoint()) {
       this.platform.log.debug(
-        `[${label}] ${this.accessory.displayName}: an off is in flight — not sending vane`,
+        `[${label}] ${this.accessory.displayName}: unit is off / turning off — holding vane "${vane}"`,
       );
+      this.stashWhileOff({ vaneDir: vane });
       this.revertSoon();
       return false;
     }
@@ -2390,6 +2471,7 @@ export class KumoThermostatAccessory {
       this.platform.log.debug(
         `[${label}] ${this.accessory.displayName}: unit is off / turning off — caching ${temp}°C without sending`,
       );
+      this.stashWhileOff({ [field]: temp });
       this.currentStatus[field] = temp;
       this.service.updateCharacteristic(characteristic, temp);
       return;
@@ -2409,6 +2491,7 @@ export class KumoThermostatAccessory {
       this.platform.log.debug(
         `[${label}] ${this.accessory.displayName}: unit turned off while held — caching ${temp}°C without sending`,
       );
+      this.stashWhileOff({ [field]: temp });
       if (this.currentStatus) {
         this.currentStatus[field] = temp;
       }

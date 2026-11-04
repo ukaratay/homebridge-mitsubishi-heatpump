@@ -149,45 +149,36 @@ test('setting a target temperature while HEATING still sends the setpoint (contr
     'sends the quantized heat setpoint with no spurious fields');
 });
 
-// ---- Fan and vane are NOT setpoints --------------------------------------
+// ---- Fan and vane on an OFF unit -----------------------------------------
 //
-// A bare, mode-less SETPOINT write resumes a powered-off unit on the LAN path,
-// which is what the guard above exists for (upstream 1.7.2). Fan speed and vane
-// do not behave that way. Verified live 2026-07-27: with the Garage powered off,
-// all six named fan speeds and all seven vane positions were written in sequence
-// and the unit reported mode=off throughout.
-//
-// Both are stored preferences that apply when the unit next runs, so blocking
-// them on an idle unit made a perfectly ordinary request — "set every fan to
-// quiet" — silently skip whichever units happened to be off. What must still be
-// blocked is a command trailing an off inside a concurrent scene burst; that is
-// covered in off-scene-setpoint-race.test.ts and guarded by offInFlight().
+// Over the LAN, fan speed and vane were stored preferences an idle unit accepted
+// (verified 2026-07-27 on the powered-off Garage). The cloud does not take them:
+// any command without a mode to an off unit returns 400
+// `modeRequiredWhenDeviceOff` (seen live 2026-11-01 and 2026-11-04). So they are
+// held for a turn-on in the same scene burst instead of being sent to fail; see
+// off-unit-scene-burst.test.ts for the turn-on that sends them.
 
-test('a fan-speed change reaches a unit that is merely OFF', async () => {
+test('a fan-speed change is not sent to a unit that is OFF', async () => {
   const { handler, sendCommandCalls } = makeHarness();
   handler.updateFromZone(zone({ power: 0, operationMode: 'off' }));
 
   await handler.setRotationSpeed(0); // superQuiet — the bottom of the slider
   await new Promise((r) => setTimeout(r, 5)); // fan writes coalesce onto the next tick
 
-  assert.strictEqual(sendCommandCalls.length, 1,
-    'an idle unit must still accept a fan-speed preference');
-  assert.deepStrictEqual(sendCommandCalls[0].commands, { fanSpeed: 'superQuiet' },
-    'and it carries no mode, so it cannot revive the unit');
+  assert.strictEqual(sendCommandCalls.length, 0,
+    'the cloud refuses a mode-less command to an off unit');
 });
 
-test('a vane change reaches a unit that is merely OFF', async () => {
+test('a vane change is not sent to a unit that is OFF', async () => {
   const { handler, sendCommandCalls } = makeHarness();
   handler.updateFromZone(zone({ power: 0, operationMode: 'off' }));
 
   await handler.setSwingMode(Characteristic.SwingMode.SWING_ENABLED);
 
-  assert.strictEqual(sendCommandCalls.length, 1);
-  assert.deepStrictEqual(sendCommandCalls[0].commands, { vaneDir: 'swing' });
+  assert.strictEqual(sendCommandCalls.length, 0);
 });
 
-test('but a setpoint still does NOT reach an OFF unit (the guard is intact)', async () => {
-  // Control: proves the two tests above narrowed the guard rather than removing it.
+test('nor is a setpoint (the original guard)', async () => {
   const { handler, sendCommandCalls } = makeHarness();
   handler.updateFromZone(zone({ power: 0, operationMode: 'off' }));
 
