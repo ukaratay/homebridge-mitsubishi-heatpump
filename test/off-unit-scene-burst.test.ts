@@ -90,6 +90,21 @@ test('Evening Temps on the OFF Garage: climate OFF + fan ON + HEAT leaves it off
   );
 });
 
+test('same scene with the fan ON dispatched before the climate OFF: still off', async () => {
+  const { handler, sendCommandCalls } = makeHarness();
+  handler.updateFromZone(zone());
+
+  await Promise.all([
+    handler.setFanActive(Characteristic.Active.ACTIVE),
+    handler.setActive(Characteristic.Active.INACTIVE),
+    handler.setHeatingThresholdTemperature(20),
+    handler.setTargetHeaterCoolerState(Characteristic.TargetHeaterCoolerState.HEAT),
+  ]);
+  await settle();
+
+  assert.deepStrictEqual(sendCommandCalls.map((c) => c.commands), [{ operationMode: 'off' }]);
+});
+
 test('control: a fan-tile ON with no off in flight still turns the unit on', async () => {
   const { handler, sendCommandCalls } = makeHarness();
   handler.updateFromZone(zone());
