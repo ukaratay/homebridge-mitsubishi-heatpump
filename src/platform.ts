@@ -80,7 +80,6 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
   // (showDrySwitch / showFanOnlySwitch / exposeVaneSlat).
   public readonly kumoConfig: KumoConfig;
   private readonly sitePollers: Map<string, NodeJS.Timeout> = new Map();
-  private readonly siteAccessories: Map<string, KumoThermostatAccessory[]> = new Map();
   private readonly degradedPollInterval: number;
   private readonly normalPollInterval: number;
   private isStreamingHealthy: boolean = false;
@@ -761,23 +760,11 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
       return;
     }
 
-    // If streaming is healthy and polling is disabled, don't start
-    if (this.isStreamingHealthy && this.kumoConfig.disablePolling) {
-      this.log.info(`Skipping poller for site ${siteId} (streaming healthy, polling disabled)`);
-      return;
-    }
-
     const interval = this.currentPollInterval();
     const intervalSec = interval / 1000;
     const mode = this.isDegradedMode ? 'DEGRADED' : 'NORMAL';
 
     this.log.info(`Starting ${mode} poller for site ${siteId}: ${intervalSec}s intervals`);
-
-    // Group accessories by site for efficient distribution
-    const accessories = this.accessoryHandlers.filter(
-      handler => handler.getSiteId() === siteId
-    );
-    this.siteAccessories.set(siteId, accessories);
 
     // Do immediate poll
     this.pollSite(siteId);
@@ -809,8 +796,7 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
       }
 
       // Distribute zone data to each accessory
-      const accessories = this.siteAccessories.get(siteId) || [];
-      for (const handler of accessories) {
+      for (const handler of this.accessoryHandlers.filter(h => h.getSiteId() === siteId)) {
         const zone = zones.find(z => z.adapter.deviceSerial === handler.getDeviceSerial());
         if (zone) {
           handler.updateFromZone(zone);
@@ -960,8 +946,7 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
         this.sitePollers.delete(siteId);
       }
       // startSitePoller derives its interval from isDegradedMode, which both callers
-      // set before calling us. It also does its own immediate poll and groups the
-      // site's accessories.
+      // set before calling us. It also does its own immediate poll.
       this.startSitePoller(siteId);
     }
 
