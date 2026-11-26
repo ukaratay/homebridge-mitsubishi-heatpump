@@ -24,9 +24,8 @@
 import test from 'node:test';
 import assert from 'node:assert';
 
-import { KumoThermostatAccessory } from '../dist/accessory.js';
 import type { Adapter, Commands, DeviceStatus, Zone } from '../dist/settings.js';
-import { Characteristic, Service, makeLog, makeAccessory } from './helpers';
+import { Characteristic, makeAccessory, SWITCHES_ON, makeAccessoryHarness } from './helpers';
 
 const SERIAL = 'TESTSOURCE01';
 
@@ -52,18 +51,9 @@ function makeLocalClient(over: Partial<FakeLocalClient> = {}): FakeLocalClient {
   };
 }
 function makeHarness({ localClient = null }: { localClient?: FakeLocalClient | null } = {}) {
-  const platform = {
-    Service, Characteristic, log: makeLog(), api: { updatePlatformAccessories() {} },
-    kumoConfig: { showDrySwitch: true, showFanOnlySwitch: true, exposeVaneSlat: true },
-    localClient,
-  };
-  const kumoAPI = { subscribeToDevice() {}, onDeviceProfileUpdate() {}, sendCommand() { return Promise.resolve(true); } };
-  const handler = new KumoThermostatAccessory(
-    platform as never,
-    makeAccessory('Kitchen', SERIAL) as never,
-    kumoAPI as never,
-  );
-  return { handler };
+  return makeAccessoryHarness({
+    kumoConfig: SWITCHES_ON, accessory: makeAccessory('Kitchen', SERIAL), localClient,
+  });
 }
 
 // A cloud (streaming/polling) zone reading for the source.

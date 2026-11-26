@@ -14,10 +14,8 @@
 import test from 'node:test';
 import assert from 'node:assert';
 
-import { KumoThermostatAccessory } from '../dist/accessory.js';
-import type { DeviceUpdateCallback } from '../dist/kumo-api.js';
 import type { Adapter, Commands, DeviceStatus, Zone } from '../dist/settings.js';
-import { Characteristic, Service, makeLog, makeAccessory } from './helpers';
+import { Characteristic, Service, SWITCHES_ON, makeAccessoryHarness } from './helpers';
 import type { FakeService } from './helpers';
 
 const SERIAL = 'TESTSERIAL001';
@@ -69,42 +67,15 @@ interface StreamingDisplayConfig {
 type StreamingUpdate = Partial<DeviceStatus> & { displayConfig?: StreamingDisplayConfig };
 
 function makeHarness({ localClient = null }: { localClient?: FakeLocalClient | null } = {}) {
-  const sendCommandCalls: CommandCall[] = [];
-  let streamCb: DeviceUpdateCallback | null = null;
-  const platform = {
-    Service,
-    Characteristic,
-    log: makeLog(),
-    api: { updatePlatformAccessories() {} },
-    kumoConfig: { showDrySwitch: true, showFanOnlySwitch: true, exposeVaneSlat: true },
-    localClient,
-  };
-  const kumoAPI = {
-    // Capture the streaming callback rather than dropping it: displayConfig
-    // (standby / defrost / filter) only ever arrives on this transport, so the
-    // carry-across tests below have no other way to put it in the cache.
-    subscribeToDevice(serial: string, cb: DeviceUpdateCallback) {
-      streamCb = cb;
-    },
-    onDeviceProfileUpdate() {},
-    sendCommand(serial: string, commands: Commands) {
-      sendCommandCalls.push({ serial, commands }); return Promise.resolve(true);
-    },
-  };
-  const accessory = makeAccessory();
-  const handler = new KumoThermostatAccessory(
-    platform as never,
-    accessory as never,
-    kumoAPI as never,
-  );
+  const h = makeAccessoryHarness({ kumoConfig: SWITCHES_ON, localClient });
   return {
-    handler, sendCommandCalls, accessory,
-    emitStreaming: (data: StreamingUpdate) => {
-      assert.ok(streamCb, 'the accessory subscribed to the streaming transport');
-      streamCb(SERIAL, data);
-    },
+    ...h,
+    // displayConfig (standby / defrost / filter) only ever arrives on the streaming
+    // transport, so the carry-across tests below have no other way to put it in
+    // the cache.
+    emitStreaming: (data: StreamingUpdate) => h.stream(data),
     heaterCooler: (): FakeService => {
-      const svc = accessory.getService(Service.HeaterCooler);
+      const svc = h.accessory.getService(Service.HeaterCooler);
       assert.ok(svc, 'the HeaterCooler service was published');
       return svc;
     },

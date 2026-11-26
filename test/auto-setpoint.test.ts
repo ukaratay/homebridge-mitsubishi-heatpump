@@ -46,41 +46,14 @@ import test from 'node:test';
 import assert from 'node:assert';
 
 import { KumoThermostatAccessory } from '../dist/accessory.js';
-import type { Adapter, Commands, Zone } from '../dist/settings.js';
-import { Characteristic, Service, makeLog, makeAccessory, type FakeAccessory } from './helpers';
+import type { Adapter, Zone } from '../dist/settings.js';
+import {
+  Characteristic, Service, type FakeAccessory, SWITCHES_ON, makeAccessoryHarness,
+} from './helpers';
 
 const SERIAL = 'TESTSERIAL001';
 
-interface SentCommand {
-  serial: string;
-  commands: Commands;
-}
-
-function makeHarness() {
-  const sendCommandCalls: SentCommand[] = [];
-  const platform = {
-    Service,
-    Characteristic,
-    log: makeLog(),
-    api: { updatePlatformAccessories() {} },
-    kumoConfig: { showDrySwitch: true, showFanOnlySwitch: true, exposeVaneSlat: true },
-  };
-  const kumoAPI = {
-    subscribeToDevice() {},
-    onDeviceProfileUpdate() {},
-    sendCommand(serial: string, commands: Commands) {
-      sendCommandCalls.push({ serial, commands });
-      return Promise.resolve(true);
-    },
-  };
-  const accessory = makeAccessory();
-  const handler = new KumoThermostatAccessory(
-    platform as never,
-    accessory as never,
-    kumoAPI as never,
-  );
-  return { handler, accessory, sendCommandCalls };
-}
+const makeHarness = () => makeAccessoryHarness({ kumoConfig: SWITCHES_ON });
 
 // Read a characteristic value off the primary climate service. That service is
 // HeaterCooler now — a ductless mini-split has an on/off state separate from its

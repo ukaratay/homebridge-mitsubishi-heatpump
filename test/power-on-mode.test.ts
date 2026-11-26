@@ -19,46 +19,23 @@
 import test from 'node:test';
 import assert from 'node:assert';
 
-import { KumoThermostatAccessory } from '../dist/accessory.js';
-import type { Commands, DeviceProfile, Zone } from '../dist/settings.js';
-import {
-  Characteristic, Service, makeLog, makeAccessory, type FakeAccessory,
-} from './helpers';
+import type { DeviceProfile, Zone } from '../dist/settings.js';
+import { Characteristic, makeAccessory, type FakeAccessory, makeAccessoryHarness } from './helpers';
 
 const SERIAL = 'TESTSERIAL001';
 
 type ProfilePayload = Partial<DeviceProfile>;
-type StreamCallback = (serial: string, data: Record<string, unknown>) => void;
 
 function makeHarness(accessory: FakeAccessory = makeAccessory('Family Room')) {
-  const sent: Commands[] = [];
-  let streamCb: StreamCallback | null = null;
-  let profileCb: ((serial: string, profile: ProfilePayload) => void) | null = null;
-  const platform = {
-    Service, Characteristic, log: makeLog(),
-    api: { updatePlatformAccessories() {} },
-    kumoConfig: {},
-  };
-  const kumoAPI = {
-    subscribeToDevice(_serial: string, cb: StreamCallback) { streamCb = cb; },
-    onDeviceProfileUpdate(cb: (serial: string, profile: ProfilePayload) => void) { profileCb = cb; },
-    sendCommand(_serial: string, commands: Commands) {
-      sent.push(commands);
-      return Promise.resolve(true);
-    },
-  };
-  const handler = new KumoThermostatAccessory(
-    platform as never, accessory as never, kumoAPI as never,
-  );
+  const h = makeAccessoryHarness({ accessory });
   return {
-    handler, accessory, sent,
-    heaterCooler: accessory.getService(Service.HeaterCooler)!,
+    ...h,
     // A device_update as the cloud's stream delivers it.
-    stream: (data: Record<string, unknown>) => streamCb!(SERIAL, {
+    stream: (data: Record<string, unknown>) => h.stream({
       deviceSerial: SERIAL, roomTemp: 21, spHeat: 20, spCool: 24, power: 1, operationMode: 'heat',
       fanSpeed: 'auto', airDirection: 'auto', humidity: null, ...data,
     }),
-    applyProfile: (p: ProfilePayload) => profileCb!(SERIAL, {
+    applyProfile: (p: ProfilePayload) => h.applyProfile({
       minimumSetPoints: { cool: 16, heat: 10, auto: 16 },
       maximumSetPoints: { cool: 31, heat: 31, auto: 31 },
       ...p,

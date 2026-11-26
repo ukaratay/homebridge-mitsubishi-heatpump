@@ -15,29 +15,13 @@
 import test from 'node:test';
 import assert from 'node:assert';
 
-import { KumoThermostatAccessory } from '../dist/accessory.js';
 import type { DeviceStatus, Zone } from '../dist/settings.js';
-import { Characteristic, Service, makeLog, makeAccessory } from './helpers';
+import { Characteristic, makeAccessory, SWITCHES_ON, makeAccessoryHarness } from './helpers';
 
 const SERIAL = 'TESTSOURCE01';
 
-function makeHarness() {
-  const platform = {
-    Service, Characteristic, log: makeLog(), api: { updatePlatformAccessories() {} },
-    kumoConfig: { showDrySwitch: true, showFanOnlySwitch: true, exposeVaneSlat: true },
-    localClient: null,
-  };
-  const kumoAPI = {
-    subscribeToDevice() {}, onDeviceProfileUpdate() {},
-    sendCommand() { return Promise.resolve(true); },
-  };
-  const handler = new KumoThermostatAccessory(
-    platform as never,
-    makeAccessory('Source', SERIAL) as never,
-    kumoAPI as never,
-  );
-  return { handler };
-}
+const makeHarness = () =>
+  makeAccessoryHarness({ kumoConfig: SWITCHES_ON, accessory: makeAccessory('Source', SERIAL) });
 const zone = (over: Record<string, unknown> = {}): Zone => ({
   id: 'zone-1',
   adapter: {

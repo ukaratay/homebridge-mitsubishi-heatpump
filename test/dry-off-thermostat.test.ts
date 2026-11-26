@@ -31,9 +31,8 @@
 import test from 'node:test';
 import assert from 'node:assert';
 
-import { KumoThermostatAccessory } from '../dist/accessory.js';
-import type { Adapter, Commands, Zone } from '../dist/settings.js';
-import { Characteristic, Service, makeLog, makeAccessory } from './helpers';
+import type { Adapter, Zone } from '../dist/settings.js';
+import { Characteristic, SWITCHES_ON, makeAccessoryHarness } from './helpers';
 
 const SERIAL = 'TESTSERIAL001';
 
@@ -41,32 +40,7 @@ const Active = Characteristic.Active;
 const CurrentState = Characteristic.CurrentHeaterCoolerState;
 const TargetState = Characteristic.TargetHeaterCoolerState;
 
-function makeHarness() {
-  const sendCommandCalls: Array<{ serial: string; commands: Commands }> = [];
-  const platform = {
-    Service,
-    Characteristic,
-    log: makeLog(),
-    api: { updatePlatformAccessories() {} },
-    kumoConfig: { showDrySwitch: true, showFanOnlySwitch: true, exposeVaneSlat: true },
-  };
-  const kumoAPI = {
-    subscribeToDevice() {},
-    onDeviceProfileUpdate() {},
-    sendCommand(serial: string, commands: Commands) {
-      sendCommandCalls.push({ serial, commands });
-      return Promise.resolve(true);
-    },
-  };
-  const accessory = makeAccessory();
-  const handler = new KumoThermostatAccessory(
-    platform as never,
-    accessory as never,
-    kumoAPI as never,
-  );
-  const heaterCooler = accessory.getService(Service.HeaterCooler)!;
-  return { handler, accessory, heaterCooler, sendCommandCalls };
-}
+const makeHarness = () => makeAccessoryHarness({ kumoConfig: SWITCHES_ON });
 
 const zone = (over: Partial<Adapter> = {}): Zone => ({
   id: 'zone-1',
