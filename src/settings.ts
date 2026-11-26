@@ -217,7 +217,10 @@ export interface DeviceProfile {
 // ---- Vane and fan-speed vocabularies --------------------------------------
 // Both lists are live-verified by write test on the author's four units
 // (MLZ-KX06NL-U1 x2, MLZ-KX12NL-U1, MSZ-GX06NL-U1): every value below was
-// accepted by the local adapter API.
+// accepted by the local adapter API. Accepted, not shown distinct: the adapter
+// accepts anything (next paragraph), and Mitsubishi's service manuals list four
+// fan speeds on the MLZ-KX cassettes (OBH943, OBH957) against five on the MSZ-GX
+// (OBH950), so on a cassette the five fan names cannot all be different speeds.
 //
 // These lists are the ONLY validation layer. The adapter does not validate: a
 // write of `vaneDir:"notARealVane"` returns HTTP 200 and is silently ignored, so
@@ -264,9 +267,12 @@ export type FanSpeed = 'auto' | 'superQuiet' | 'quiet' | 'low' | 'powerful' | 's
  * a linear control (a HomeKit RotationSpeed slider, say) must treat index 0 as the
  * auto sentinel and rank only `FAN_SPEEDS.slice(1)`.
  *
- * The device profile's `numberOfFanSpeeds` is ADVISORY ONLY and must not gate this
- * list: a unit reporting 3 accepted all five named speeds (verified). pykumo agrees;
- * Home Assistant's `_FAN_SPEEDS_BY_COUNT[3] = [quiet, low, powerful]` is wrong here.
+ * The device profile's `numberOfFanSpeeds` does not gate this list: a unit reporting
+ * 3 accepted all five named speeds, and pykumo sends all five too. That is acceptance
+ * only (the adapter does not validate), so it does not show which speeds are distinct,
+ * nor that Home Assistant's `_FAN_SPEEDS_BY_COUNT[3] = [quiet, low, powerful]` is
+ * wrong about that. A write-then-read-back test per head would settle it; none has
+ * been run here.
  */
 export const FAN_SPEEDS: readonly FanSpeed[] = [
   'auto',

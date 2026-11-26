@@ -16,7 +16,7 @@ liability for damage or loss arising from it.
 
 - **One tile per unit.** On/off, Heat / Cool / Auto, and the setpoint for the active
   mode. Auto shows a two-handle band.
-- **Fan speed on the tile** — five real speeds plus fan-auto, on a linked Fan service.
+- **Fan speed on the tile** — five speed positions plus fan-auto, on a linked Fan service.
 - **Vane control** — swing on the main tile, discrete tilt angles through an opt-in
   `Slats` service.
 - **Fahrenheit-anchored setpoints.** Every setpoint is stored as the 0.5°C step nearest
@@ -109,14 +109,21 @@ characteristic, and there is no state for dehumidify or fan-only. So:
 - **Setpoints are the two thresholds.** The Home app shows the heating threshold in Heat,
   the cooling threshold in Cool, and both as a band in Auto. Modes the unit's profile says
   it cannot do are removed from the picker.
+- **Auto on a multi-zone system.** Mitsubishi's operating manuals do not recommend Auto
+  mode for an indoor unit on an MXZ multi-zone outdoor unit: with several units running,
+  one may be unable to change between heating and cooling, and waits in standby instead.
 - **What the unit is doing is reported honestly:** heating, cooling, or **idle** when the
-  compressor is in standby or the unit is in fan-only.
-- **Fan speed and fan-auto** are on a linked Fan service — five speeds at 0 / 25 / 50 /
-  75 / 100 on the slider, plus Auto on units whose profile has it.
+  unit reports standby or is in fan-only.
+- **Fan speed and fan-auto** are on a linked Fan service — five positions at 0 / 25 / 50 /
+  75 / 100 on the slider, plus Auto on units whose profile has it. A unit with fewer real
+  speeds has fewer distinct airflows than positions: Mitsubishi lists four on the MLZ-KX
+  ceiling cassettes and five on the MSZ-GX wall unit.
 - **Dry** and **Fan-only** are opt-in switches (`showDrySwitch`, `showFanOnlySwitch`),
   added only on units that support them, and mutually exclusive. Dry reports as Cool,
-  where its setpoint genuinely lives. Changing fan speed while heating or cooling needs no
-  switch.
+  because HomeKit has no Dry state. Mitsubishi's manuals for the units checked say the
+  temperature cannot be set in Dry (the unit picks its own target from the room
+  temperature at start), so the setpoint shown may have no effect there. Changing fan
+  speed while heating or cooling needs no switch.
 - **Indoor humidity** is a HumiditySensor, on by default. Turn it off if the Home app's
   collapsed tile shows humidity where you wanted temperature.
 - **Filter indicator** appears when the unit reports its filter needs cleaning.
