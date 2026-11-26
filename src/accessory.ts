@@ -10,10 +10,16 @@ import { cToF, quantizeSetpointInRange, sameSetpoint } from './temperature';
 /**
  * Fan speed <-> HomeKit RotationSpeed, on the Fanv2 service.
  *
- * The slider carries ONLY the five real airflow levels, evenly spaced across the
+ * The slider carries ONLY the five named airflow levels, evenly spaced across the
  * whole range at 25% intervals: 0/25/50/75/100 map to FAN_SPEEDS[1..5]
- * (superQuiet..superPowerful). Every position is a distinct speed — no value is
- * duplicated and none is dead. `auto` is deliberately NOT on the slider.
+ * (superQuiet..superPowerful). `auto` is deliberately NOT on the slider.
+ *
+ * Five names is not five airflows on every head. Mitsubishi's service manuals
+ * give the MSZ-GX wall unit five speeds (OBH950) and the MLZ-KX ceiling
+ * cassettes four (OBH943, OBH957), so on a cassette the five positions cannot
+ * all be distinct. Which ones coincide is unverified: no Mitsubishi document
+ * maps these API names to the remote's speeds, and settling it needs a
+ * write-then-read-back test on hardware.
  *
  * An earlier version put `auto` at 0 on the HeaterCooler's own RotationSpeed and
  * it was wrong twice over: RotationSpeed is a percentage, and 0 reads as "off"
@@ -29,17 +35,22 @@ import { cToF, quantizeSetpointInRange, sameSetpoint } from './temperature';
  * trade-off this accepts: a fan reporting 0% can lead some controllers to send
  * 100% on activation, so watch for a unit coming on at full blast.
  *
- * All five speeds are offered on every unit regardless of `numberOfFanSpeeds`,
- * which is advisory — a unit reporting 3 accepted all five on live hardware.
+ * All five speeds are offered on every unit regardless of `numberOfFanSpeeds`:
+ * a unit reporting 3 accepted all five on live hardware. Accepted is weak
+ * evidence — the adapter answers HTTP 200 to values it ignores (see the
+ * vocabulary note in settings.ts) — so that shows the names do no harm, not
+ * that each one is a different speed.
  */
 const FAN_PCT_STEP = 25;
 
 /**
  * Vane position <-> HomeKit tilt angle, for the optional Slats service.
  * `horizontal` (blade flattest, air thrown furthest) is -90 and `vertical`
- * (blade pointing down) is +90, matching HAP's tilt convention. `auto` and
- * `swing` are not fixed angles and are therefore absent — they are expressed
- * through SwingMode and CurrentSlatState instead.
+ * (blade pointing down) is +90, matching HAP's tilt convention. `swing` is not
+ * an angle, and `auto` is one only the unit knows: per Mitsubishi's operating
+ * manuals it is a fixed position chosen by mode (horizontal in cool and dry,
+ * downward in heat), so it has no single tilt value. Both are therefore absent
+ * — they are expressed through SwingMode and CurrentSlatState instead.
  */
 const VANE_TILT: ReadonlyArray<{ vane: VaneDirection; angle: number }> = [
   { vane: 'horizontal', angle: -90 },
@@ -1944,7 +1955,7 @@ export class KumoThermostatAccessory {
    *
    * HeaterCooler cannot express "fan auto" — TargetFanState is a Fanv2
    * characteristic — which is the whole reason this service exists. Speed lives
-   * on RotationSpeed (five real detents, no zero), auto/manual on TargetFanState,
+   * on RotationSpeed (five detents, no zero), auto/manual on TargetFanState,
    * and swing on SwingMode once the profile confirms the unit has one.
    */
   private setupFanService(): void {
@@ -1979,7 +1990,8 @@ export class KumoThermostatAccessory {
 
     this.fanService.getCharacteristic(C.RotationSpeed)
       // Five evenly spaced positions across the full range: 0/25/50/75/100, one
-      // per real speed, no duplicates and nothing dead. minValue must stay 0
+      // per named speed (see the note at the top of this file on heads with
+      // fewer real speeds than names). minValue must stay 0
       // regardless — hap-nodejs REJECTS a client write below minValue with -70410
       // rather than clamping it, and the Home app sends 0 when a fan slider is
       // dragged to the bottom.

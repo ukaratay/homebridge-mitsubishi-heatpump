@@ -149,7 +149,7 @@ The plugin reads a subset; the rest is recorded because the vendor documents non
 |---|---|---|
 | `displayConfig.filter` | `filterDirty` | Filter needs cleaning |
 | `displayConfig.defrost` | `defrost` | Defrost cycle active |
-| `displayConfig.standby` | `standby` | Compressor idle |
+| `displayConfig.standby` | `standby` | Standby, shown as idle. Mitsubishi's manuals use the word for a multi-zone unit held back by a mode conflict with another unit; whether the cloud flag also covers ordinary thermo-off is unverified |
 | `displayConfig.hotAdjust` | — | Hot adjust active |
 
 `tempSource` is worth knowing: it names which thermistor regulates the unit. `sensor0`
@@ -191,7 +191,7 @@ One accessory per indoor unit.
 | Characteristic | Notes |
 |---|---|
 | `Active` | On/off. Independent of mode |
-| `CurrentHeaterCoolerState` | Inactive / idle / heating / cooling. Idle is real — fan-only and compressor standby report it |
+| `CurrentHeaterCoolerState` | Inactive / idle / heating / cooling. Idle is real — fan-only and the `standby` flag report it |
 | `TargetHeaterCoolerState` | Heat / cool / auto, narrowed to what the unit's profile supports |
 | `CurrentTemperature` | From the paired wireless sensor when there is one, otherwise the unit's own thermistor |
 | `HeatingThresholdTemperature`, `CoolingThresholdTemperature` | These **are** the setpoint controls in every mode. There is deliberately no `TargetTemperature` |
@@ -199,7 +199,8 @@ One accessory per indoor unit.
 | `TemperatureDisplayUnits` | Settable. The Home app ignores it; Eve and others honour it |
 
 **Fanv2** (linked, subtype `airflow`): `Active`, `CurrentFanState`, `RotationSpeed`
-(`minValue` 0, `maxValue` 100, `minStep` 25 — five detents, nothing dead), and
+(`minValue` 0, `maxValue` 100, `minStep` 25 — five detents, one per named speed; a head with four real speeds,
+such as an MLZ-KX cassette, cannot have five distinct ones), and
 `TargetFanState` on units whose profile reports an auto fan.
 
 **Optional, per unit:**
