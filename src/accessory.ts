@@ -95,7 +95,9 @@ export class KumoThermostatAccessory {
   private lastLocalUpdateTs: number = 0;
   // While a local poll has arrived within this window, local is the authoritative
   // status source and cloud updates are dropped (the cloud lags ~7-10s and would
-  // otherwise clobber fresher local data). Should exceed the local poll interval.
+  // otherwise clobber fresher local data). Meant to exceed the local poll
+  // interval; the schema allows localPollInterval up to 120 s, so at 45 s or
+  // more a cloud update can land between two local polls.
   private readonly LOCAL_AUTHORITATIVE_MS = 45000;
   // Cloud-reported adapter reachability from `device_status_v2`. null = nothing
   // reported yet (treated as reachable). See setCloudConnected.
@@ -160,8 +162,8 @@ export class KumoThermostatAccessory {
   // Timestamp (ms) of the most recent HomeKit "off" request. Within
   // OFF_SUPPRESS_WINDOW_MS of it, setpoint writes are suppressed (cached + echoed
   // but not sent). An "AC off" scene captures each thermostat's full state and
-  // re-pushes its setpoints (TargetTemperature, and for an AUTO unit the two
-  // threshold handles) alongside OFF; HomeKit dispatches them concurrently in an
+  // re-pushes its setpoints (the two threshold characteristics) alongside OFF;
+  // HomeKit dispatches them concurrently in an
   // arbitrary order. A setpoint landing after the off reaches the LAN adapter as
   // a bare, mode-less write (local commands carry no power field — see
   // local-api.ts) and powers the unit back on. The unit is being turned off —
@@ -301,10 +303,10 @@ export class KumoThermostatAccessory {
       .onSet(this.setCoolingThresholdTemperature.bind(this));
 
     // --- fan ---
-    // Fan speed and swing live on a Fanv2 service, not here. See setupFanService.
-    // An accessory cached by an earlier version carries RotationSpeed (and maybe
-    // SwingMode) on the HeaterCooler; strip them so the unit does not end up with
-    // two competing fan controls.
+    // Fan speed lives on a Fanv2 service, not here. See setupFanService. Swing
+    // does stay on the HeaterCooler (see applyDeviceProfile). An accessory cached
+    // by an earlier version carries RotationSpeed on the HeaterCooler; strip it so
+    // the unit does not end up with two competing fan controls.
     this.removeStaleCharacteristic(this.service, this.platform.Characteristic.RotationSpeed);
     this.setupFanService();
 
@@ -393,7 +395,7 @@ export class KumoThermostatAccessory {
     //
     // Guarded on the method existing for the same reason linkSecondaryService is:
     // this runs during construction, where a throw takes out the whole accessory,
-    // and a KumoAPI built before sensor_update existed does not carry it.
+    // and a stubbed KumoAPI (the test fakes) need not carry it.
     if (typeof this.kumoAPI.onSensorUpdate === 'function') {
       this.kumoAPI.onSensorUpdate((reading: SensorReading) => {
         if (reading && reading.deviceSerial === this.deviceSerial) {
@@ -589,7 +591,7 @@ export class KumoThermostatAccessory {
     }
     this.service.getCharacteristic(T).setProps({ validValues: modes });
 
-    // Swing lives on the main tile when the unit supports it.
+    // Fan auto/manual is TargetFanState on the Fanv2, when the unit has fan auto.
     if (profile.hasFanSpeedAuto && !this.targetFanStateRegistered && this.fanService) {
       this.fanService.getCharacteristic(this.platform.Characteristic.TargetFanState)
         .onGet(this.getTargetFanState.bind(this))
@@ -611,8 +613,9 @@ export class KumoThermostatAccessory {
       // therefore invisible unless the user has opted into "Show as Separate
       // Tiles" — and with the Slats service off by default, that would leave vane
       // control unreachable in the Home app on a default install.
-      // Home Assistant's own HeaterCooler migration (core#148231) moves only
-      // RotationSpeed and keeps swing on the climate service for the same reason.
+      // Home Assistant's own HeaterCooler migration (core#148231) also moves only
+      // the fan controls and keeps swing on the climate service. That PR states no
+      // rendering reason, so it is precedent for the layout, not evidence for it.
       this.service.getCharacteristic(C.SwingMode)
         .onGet(this.getSwingMode.bind(this))
         .onSet(this.setSwingMode.bind(this));
@@ -639,7 +642,7 @@ export class KumoThermostatAccessory {
     }
 
     // Add / remove the fan-only switch based on device capability AND config.
-    // Fan speed now lives on the HeaterCooler tile, so this switch is only for
+    // Fan speed lives on the linked Fanv2 service, so this switch is only for
     // fan-ONLY mode (no heating or cooling) and is off by default.
     if (profile.hasModeVent && this.platform.kumoConfig.showFanOnlySwitch === true) {
       this.setupFanOnlySwitch();
@@ -1404,11 +1407,11 @@ export class KumoThermostatAccessory {
     // HeaterCooler has no single TargetTemperature; the two thresholds below
     // carry the setpoints in every mode.
 
-    // Keep the AUTO-mode threshold characteristics in sync with the live band.
-    // The Home app only surfaces these in AUTO; refreshing them in any mode is
-    // harmless (each is independent within its own min/max props, so a unit
+    // Keep both threshold characteristics in sync with the unit's setpoints.
+    // The Home app shows the heating one in HEAT, the cooling one in COOL and
+    // both in AUTO; each is independent within its own min/max props, so a unit
     // sitting in heat/cool with an inverted spHeat>spCool pair never trips a
-    // HomeKit constraint — the values just aren't shown until AUTO is selected).
+    // HomeKit constraint.
     if (status.spHeat !== undefined && status.spHeat !== null && !isNaN(status.spHeat)) {
       this.service.updateCharacteristic(
         this.platform.Characteristic.HeatingThresholdTemperature,
@@ -1931,15 +1934,15 @@ export class KumoThermostatAccessory {
     }, 100);
   }
 
-  // ---- Fanv2: speed, auto/manual, swing -----------------------------------
+  // ---- Fanv2: speed, auto/manual ------------------------------------------
 
   /**
    * The Fanv2 service: everything about air movement in one place.
    *
    * HeaterCooler cannot express "fan auto" — TargetFanState is a Fanv2
    * characteristic — which is the whole reason this service exists. Speed lives
-   * on RotationSpeed (five detents, no zero), auto/manual on TargetFanState,
-   * and swing on SwingMode once the profile confirms the unit has one.
+   * on RotationSpeed (five detents, no zero) and auto/manual on TargetFanState.
+   * Swing is not here: SwingMode stays on the HeaterCooler (applyDeviceProfile).
    */
   private setupFanService(): void {
     if (this.fanService) {
@@ -2711,12 +2714,11 @@ export class KumoThermostatAccessory {
   }
 
   /**
-   * Write one edge of the AUTO setpoint band. HomeKit pushes these when the user
-   * drags the range handles in AUTO: spHeat is the low/heat bound, spCool the
-   * high/cool bound. Mirrors setTargetTemperature — same powered-off guard (the
-   * v3 API 400s a bare setpoint on an off unit, see 1.5.2), optimistic echo, and
-   * revert-on-failure. spHeat/spCool are always the per-mode setpoints, so this
-   * is safe even on the rare out-of-AUTO write.
+   * Write one setpoint: the heating threshold (spHeat) or the cooling threshold
+   * (spCool). This is the setpoint writer in every mode: HomeKit sends the
+   * heating one in HEAT, the cooling one in COOL, and either edge of the band in
+   * AUTO. Powered-off guard (the v3 API 400s a bare setpoint on an off unit, see
+   * 1.5.2), optimistic echo, and revert-on-failure.
    */
   private async setThresholdTemperature(field: 'spHeat' | 'spCool', temp: number): Promise<void> {
     const characteristic = field === 'spHeat'
@@ -2753,7 +2755,7 @@ export class KumoThermostatAccessory {
 
     // Hold briefly so an "AC off" dispatched alongside this handle wins
     // regardless of order (see setpointWriteGen). Keyed per field so the two
-    // AUTO handles don't supersede each other.
+    // thresholds don't supersede each other.
     const hold = await this.holdSetpointWrite(field);
     if (hold === 'superseded') {
       return;
@@ -2778,7 +2780,7 @@ export class KumoThermostatAccessory {
       this.service.updateCharacteristic(characteristic, temp);
       // Then confirm against the device rather than trusting our own echo.
       this.scheduleSetpointReconcile(field);
-      // Mirror a HomeKit-driven AUTO-handle change to any followers immediately.
+      // Mirror a HomeKit-driven setpoint change to any followers immediately.
       this.notifyStatusListeners();
     } else {
       this.platform.log.error(`[${label}] ${this.accessory.displayName}: Failed to set ${field} to ${temp}`);
