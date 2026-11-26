@@ -15,42 +15,12 @@
 import test from 'node:test';
 import assert from 'node:assert';
 
-import { KumoThermostatAccessory } from '../dist/accessory.js';
-import type { Commands, Zone } from '../dist/settings.js';
-import { Characteristic, Service, makeLog, makeAccessory } from './helpers';
+import type { Zone } from '../dist/settings.js';
+import { Characteristic, makeAccessory, makeAccessoryHarness } from './helpers';
 
 const SERIAL = 'TESTSERIAL001';
 
-interface SentCommand {
-  serial: string;
-  commands: Commands;
-}
-
-function makeHarness() {
-  const sendCommandCalls: SentCommand[] = [];
-  const platform = {
-    Service,
-    Characteristic,
-    log: makeLog(),
-    api: { updatePlatformAccessories() {} },
-    kumoConfig: {},
-  };
-  const kumoAPI = {
-    subscribeToDevice() {},
-    onDeviceProfileUpdate() {},
-    sendCommand(serial: string, commands: Commands) {
-      sendCommandCalls.push({ serial, commands });
-      return Promise.resolve(true);
-    },
-  };
-  const accessory = makeAccessory('Garage');
-  const handler = new KumoThermostatAccessory(
-    platform as never,
-    accessory as never,
-    kumoAPI as never,
-  );
-  return { handler, sendCommandCalls };
-}
+const makeHarness = () => makeAccessoryHarness({ accessory: makeAccessory('Garage') });
 
 const zone = (over: Record<string, unknown> = {}): Zone => ({
   id: 'zone-1',

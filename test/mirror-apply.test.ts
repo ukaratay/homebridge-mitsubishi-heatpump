@@ -4,9 +4,8 @@
 import test from 'node:test';
 import assert from 'node:assert';
 
-import { KumoThermostatAccessory } from '../dist/accessory.js';
-import type { Adapter, Commands, DeviceProfile, Zone } from '../dist/settings.js';
-import { Characteristic, Service, makeLog, makeAccessory } from './helpers';
+import type { Adapter, DeviceProfile, Zone } from '../dist/settings.js';
+import { Characteristic, makeAccessory, SWITCHES_ON, makeAccessoryHarness } from './helpers';
 
 const SERIAL = 'TESTTARGET01';
 
@@ -21,30 +20,10 @@ const profile = (over: Partial<DeviceProfile> = {}): DeviceProfile => ({
 });
 
 function makeHarness() {
-  const sendCommandCalls: Array<{ serial: string; commands: Commands }> = [];
-  let profileCb: ((serial: string, deviceProfile: DeviceProfile) => void) | null = null;
-  const platform = {
-    Service, Characteristic, log: makeLog(),
-    api: { updatePlatformAccessories() {} },
-    kumoConfig: { showDrySwitch: true, showFanOnlySwitch: true, exposeVaneSlat: true },
-    localClient: null,
-  };
-  const kumoAPI = {
-    subscribeToDevice() {},
-    onDeviceProfileUpdate(cb: (serial: string, deviceProfile: DeviceProfile) => void) {
-      profileCb = cb;
-    },
-    sendCommand(serial: string, commands: Commands) {
-      sendCommandCalls.push({ serial, commands }); return Promise.resolve(true);
-    },
-  };
-  const handler = new KumoThermostatAccessory(
-    platform as never,
-    makeAccessory('Target', SERIAL) as never,
-    kumoAPI as never,
-  );
-  const setProfile = (p: DeviceProfile) => profileCb!(SERIAL, p);
-  return { handler, sendCommandCalls, setProfile };
+  const h = makeAccessoryHarness({
+    kumoConfig: SWITCHES_ON, accessory: makeAccessory('Target', SERIAL),
+  });
+  return { ...h, setProfile: h.applyProfile };
 }
 
 const zone = (over: Partial<Adapter> = {}): Zone => ({

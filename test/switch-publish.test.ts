@@ -22,10 +22,9 @@
 import test from 'node:test';
 import assert from 'node:assert';
 
-import { KumoThermostatAccessory } from '../dist/accessory.js';
-import type { Adapter, DeviceProfile, KumoConfig, Zone } from '../dist/settings.js';
+import type { Adapter, Commands, DeviceProfile, KumoConfig, Zone } from '../dist/settings.js';
 import {
-  Characteristic, Service, makeLog, makeAccessory,
+  Characteristic, Service, makeAccessory, makeAccessoryHarness,
   type FakeAccessory, type FakeService,
 } from './helpers';
 
@@ -38,46 +37,30 @@ type ProfilePayload = Partial<DeviceProfile>;
 const ALL_ON: Partial<KumoConfig> =
   { showDrySwitch: true, showFanOnlySwitch: true, exposeVaneSlat: true };
 
+// Every command any harness in this file sends. Publishing a structure change is
+// bookkeeping and must never command the unit; the last test in the file checks
+// that this stayed empty. (These harnesses once had no sendCommand at all, so a
+// stray send crashed the file by accident. This says the same thing on purpose.)
+const sentByAnyHarness: Commands[][] = [];
+
 function makeHarness(kumoConfig: Partial<KumoConfig> = ALL_ON, existingAccessory?: FakeAccessory) {
-  // Each element is the array handed to updatePlatformAccessories, so the length
-  // of `updates` is the publish count — which is what every assertion below reads.
-  const updates: FakeAccessory[][] = [];
-  let profileCb: ((serial: string, profile: ProfilePayload) => void) | null = null;
-  let streamCb: ((serial: string, data: Record<string, unknown>) => void) | null = null;
-  const config: Partial<KumoConfig> = { ...kumoConfig };
-  const platform = {
-    Service,
-    Characteristic,
-    log: makeLog(),
-    api: { updatePlatformAccessories: (a: FakeAccessory[]) => updates.push(a) },
-    kumoConfig: config,
-  };
-  const kumoAPI = {
-    subscribeToDevice(_serial: string, cb: (serial: string, data: Record<string, unknown>) => void) {
-      streamCb = cb;
-    },
-    onDeviceProfileUpdate(cb: (serial: string, profile: ProfilePayload) => void) { profileCb = cb; },
-  };
-  const accessory = existingAccessory ?? makeAccessory('Living room');
-  const handler = new KumoThermostatAccessory(
-    platform as never,
-    accessory as never,
-    kumoAPI as never,
-  );
+  const h = makeAccessoryHarness({
+    kumoConfig, accessory: existingAccessory ?? makeAccessory('Living room'),
+  });
+  sentByAnyHarness.push(h.sent);
   // Both are created by the constructor, before any profile arrives. Asserted
   // rather than optional-chained: if either stops being built the tests below
   // should fail on the missing tile, not silently pass an `undefined` comparison.
-  const heaterCooler = accessory.getService(Service.HeaterCooler);
-  assert.ok(heaterCooler, 'the constructor publishes the HeaterCooler service');
-  const fan = accessory.getServiceById(Service.Fanv2, 'airflow');
-  assert.ok(fan, 'the constructor publishes the linked Fanv2 service');
+  assert.ok(h.heaterCooler, 'the constructor publishes the HeaterCooler service');
+  assert.ok(h.fan, 'the constructor publishes the linked Fanv2 service');
   return {
-    handler, accessory, updates, config, heaterCooler, fan,
-    // A profile listener is registered in the constructor; if it ever stops being
-    // registered this blows up loudly instead of quietly testing nothing.
-    applyProfile: (p: ProfilePayload) => profileCb!(SERIAL, p),
+    ...h,
+    // Each element is the array handed to updatePlatformAccessories, so the length
+    // of `updates` is the publish count — which is what every assertion below reads.
+    updates: h.published,
+    config: h.kumoConfig,
     // A device_update as the cloud's stream delivers it.
-    stream: (data: Record<string, unknown>) => streamCb!(SERIAL, {
+    stream: (data: Record<string, unknown>) => h.stream({
       deviceSerial: SERIAL, roomTemp: 22, spHeat: 20, spCool: 24, power: 1, operationMode: 'cool',
       fanSpeed: 'auto', airDirection: 'auto', humidity: null, ...data,
     }),
@@ -497,4 +480,11 @@ test('swing stays available with Slats off', () => {
   const registered = registeredOn(heaterCooler);
   assert.ok(registered.includes('SwingMode'),
     `SwingMode must be on the climate tile when Slats is off; got ${registered}`);
+});
+
+// Keep this test last: it reads what every harness above sent.
+test('no test in this file sent the unit a command', async () => {
+  await new Promise((r) => setTimeout(r, 20));   // let any stray async send land
+  assert.deepStrictEqual(sentByAnyHarness.flat(), [],
+    'applying a profile or publishing a service must not send a command');
 });
