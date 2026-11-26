@@ -60,7 +60,7 @@ function makeHarness({
     },
     getDeviceStatus: async () => null,
   };
-  const handler = new KumoThermostatAccessory(platform as never, accessory as never, kumoAPI as never, 30);
+  const handler = new KumoThermostatAccessory(platform as never, accessory as never, kumoAPI as never);
   const heaterCooler = accessory.getService(Service.HeaterCooler)!;
   const value = (id: unknown) => heaterCooler.getCharacteristic(id).value;
   const sensor = (reading: Record<string, unknown>) => sensorCb!({ deviceSerial: SERIAL, ...reading });

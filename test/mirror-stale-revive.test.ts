@@ -62,7 +62,6 @@ function makeHarness({ localClient = null }: { localClient?: FakeLocalClient | n
     platform as never,
     makeAccessory('Kitchen', SERIAL) as never,
     kumoAPI as never,
-    30,
   );
   return { handler };
 }

@@ -63,7 +63,6 @@ function makeHarness() {
     platform as never,
     accessory as never,
     kumoAPI as never,
-    30,
   );
   const heaterCooler = accessory.getService(Service.HeaterCooler)!;
   return { handler, accessory, heaterCooler, sendCommandCalls };
