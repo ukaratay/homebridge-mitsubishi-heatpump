@@ -81,10 +81,14 @@ as-is.
 
 ### UI coverage
 
-Every option renders in the Homebridge UI form except `localControlIps`, which is a
-free-form serial-to-IP map the form cannot express. Set it in the JSON config editor; the
-Local Control section carries a help block saying so, and any value already there is
-preserved when you save the form.
+Every option renders in the Homebridge UI form except two:
+
+- `localControlIps`, a free-form serial-to-IP map the form cannot express. Set it in the
+  JSON config editor; the Local Control section carries a help block saying so, and any
+  value already there is preserved when you save the form.
+- `streamingStaleThreshold`, which is inert (see the table above). It stays in the schema
+  so a `config.json` that sets it remains valid, but the form no longer shows a control
+  that does nothing. It is JSON-only.
 
 ### Restart scope
 
