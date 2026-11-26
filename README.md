@@ -16,9 +16,10 @@ liability for damage or loss arising from it.
 
 - **One tile per unit.** On/off, Heat / Cool / Auto, and the setpoint for the active
   mode. Auto shows a two-handle band.
-- **Fan speed on the tile** — five speed positions plus fan-auto, on a linked Fan service.
-- **Vane control** — swing on the main tile, discrete tilt angles through an opt-in
-  `Slats` service.
+- **Fan speed on the tile** — five speed positions on a linked Fan service, plus fan auto
+  through a per-unit **Fixed Fan Speed** switch.
+- **Vane control** — swing on the main tile, where swing off means vane auto. Discrete
+  tilt angles through an opt-in `Slats` service.
 - **Fahrenheit-anchored setpoints.** Every setpoint is stored as the 0.5°C step nearest
   a whole °F, so the Home app shows back the degree you set.
 - **Wireless sensor support.** Units with a paired sensor report its finer temperature
@@ -55,6 +56,21 @@ npm install && npm run build && npm link
 
 Then add your credentials — see **[Configuration](https://github.com/ukaratay/homebridge-mitsubishi-heatpump/blob/main/docs/configuration.md)** for the
 minimal config and every option.
+
+## Upgrading from 2.x
+
+Two changes affect scenes you already have, and each unit gets one new switch.
+
+- **Scenes set fan auto.** A scene that captured a manual fan speed now sets fan auto when
+  it runs, unless you edit it to include that unit's Fixed Fan Speed switch turned on.
+  Scenes saved in fan auto behave as before. To keep the 2.3.1 behaviour, set
+  `fixedFanSpeedSwitch` to `false`. See [Fan auto and scenes](#fan-auto-and-scenes).
+- **Oscillate off sets vane auto.** Turning swing off, by hand or from a scene, now sends
+  vane auto. 2.3.1 sent the last fixed angle it had seen since Homebridge started, or auto
+  if it had seen none. There is no option to keep that. If you never pin a vane angle, you
+  will see no change. See [Vane and swing](#vane-and-swing).
+- **New switch.** Each unit with an auto fan gets a switch named `<unit> Fixed Fan Speed`.
+  `fixedFanSpeedSwitch: false` removes it.
 
 ## Migrating from homebridge-mitsubishi-comfort
 
@@ -114,10 +130,13 @@ characteristic, and there is no state for dehumidify or fan-only. So:
   one may be unable to change between heating and cooling, and waits in standby instead.
 - **What the unit is doing is reported honestly:** heating, cooling, or **idle** when the
   unit reports standby or is in fan-only.
-- **Fan speed and fan-auto** are on a linked Fan service — five positions at 0 / 25 / 50 /
-  75 / 100 on the slider, plus Auto on units whose profile has it. A unit with fewer real
-  speeds has fewer distinct airflows than positions: Mitsubishi lists four on the MLZ-KX
-  ceiling cassettes and five on the MSZ-GX wall unit.
+- **Fan speed** is on a linked Fan service — five positions at 0 / 25 / 50 / 75 / 100 on
+  the slider. A unit with fewer real speeds has fewer distinct airflows than positions:
+  Mitsubishi lists four on the MLZ-KX ceiling cassettes and five on the MSZ-GX wall unit.
+  The Apple Home app folds this fan into the unit's own page as a speed slider and shows
+  **no** Auto/Manual control for it (Eve and other HomeKit apps do). Fan auto is reached
+  through the unit's **Fixed Fan Speed** switch, on by default on units with an auto fan.
+  See [Fan auto and scenes](#fan-auto-and-scenes).
 - **Dry** and **Fan-only** are opt-in switches (`showDrySwitch`, `showFanOnlySwitch`),
   added only on units that support them, and mutually exclusive. Dry reports as Cool,
   because HomeKit has no Dry state. Mitsubishi's manuals for the units checked say the
@@ -132,11 +151,71 @@ characteristic, and there is no state for dehumidify or fan-only. So:
 > range, doesn't appear in the Home app, restart your iPhone or iPad. Restarting the Home
 > hub or force-quitting the Home app has not been enough.
 
+### Fan auto and scenes
+
+**A scene sets fan auto on each unit in it, unless the scene turns that unit's Fixed Fan
+Speed switch on.**
+
+A Home scene stores the fan's speed **and** its Manual/Auto mode for every unit in it,
+even though Home shows no control for the mode. Up to 2.3.1, a scene saved while a fan was
+at a manual speed put it back at that speed every time it ran, and nothing in Home showed
+it. With the slider at 0 that is the quietest speed, which limits how much heating or
+cooling the unit can deliver. Mitsubishi's operating manuals recommend fan auto when
+several indoor units on one outdoor unit heat at the same time.
+
+Each unit with an auto fan has a switch named `<unit> Fixed Fan Speed`:
+
+- **It is on while the unit runs at a fixed speed**, and off in fan auto.
+- **It reads off while the unit is off**, whatever the unit has stored, so the Home app
+  does not count an off unit as on. Off says nothing about the fan then.
+- **Turn it off to set fan auto.** Turn it on to go back to the speed the slider shows.
+  Turning it on while the unit is off sends nothing and the switch goes back to off; the
+  speed is applied only if the unit is turned on within a few seconds.
+
+To build a scene that holds a speed, set the unit's fan slider to that speed **and**
+include the unit's Fixed Fan Speed switch, turned on (not yet tried on a device: if a scene
+with the slider at the bottom does not hold, use 25%). A scene that leaves the switch out,
+or turns it off, sets fan auto. If you build a scene while a unit runs at a fixed speed
+and keep its switch as it is, the scene holds that speed.
+
+The rule applies to a request that sets the unit's Fan Mode together with its climate
+controls (power, mode, setpoints or swing), which is how a Home scene arrives. A Home
+automation, or another app's scene, that does the same is treated the same way. Anything
+else does what it says: dragging the slider, asking Siri for a speed, or setting Fan Mode
+in Eve.
+
+What this costs:
+
+- **Nothing in Home says Auto.** With the unit on, read "Fixed Fan Speed: off" as fan auto.
+- **The slider does not show the real speed in auto.** The unit reports no speed in auto,
+  so the slider shows the last manual speed.
+
+To opt out, set `fixedFanSpeedSwitch` to `false`. The switch goes, and scenes replay the
+fan speed and mode they captured, as in 2.3.1. Units without an auto fan have no switch,
+and their scenes set the speed they captured.
+
 ### Vane and swing
 
 Swing on/off lives on the main tile via `SwingMode`. Apple Home does not render an
 Oscillate toggle for a collapsed accessory's fan service, which is why swing is on the
 climate service and not the fan.
+
+**Oscillate off means vane auto.** On sends swing. Off sends the vane's **auto** position
+(a fixed position the unit chooses by mode: horizontal in cool and dry, downward in heat,
+per Mitsubishi's operating manuals), whatever the vane was doing, whether you tap it, ask
+Siri, or a scene replays it. HomeKit has no other control that can carry vane auto.
+
+What this costs:
+
+- **Oscillate reads off for auto and for every fixed angle alike.**
+- **An angle set with the remote or the Mitsubishi app does not survive a scene.** The next
+  scene that includes the unit sets the vane to auto, or to the scene's own tilt angle
+  when Slats is on.
+- **A fixed angle from Home needs the opt-in Slats control** (`exposeVaneSlat`, below).
+  When a request carries both, a tilt angle beats Oscillate off, and Oscillate on beats a
+  tilt angle.
+- **A unit with fixed angles but no swing has no Oscillate**, so Home cannot set its vane
+  to auto.
 
 Discrete tilt angles need `exposeVaneSlat`, which is **off by default**. Apple Home
 categorises a HAP `Slats` service as a **window covering**: turned on, each unit's vane
@@ -207,6 +286,18 @@ the cloud keeps serving that state from a frozen record and it may be hours old.
 
 In the Homebridge log, look for `[REACHABILITY] <unit>: unreachable` and
 `[REACHABILITY] <unit>: back online`, and for `reported offline (reason: ...)`.
+
+### The fan changes when a scene runs
+
+With the Fixed Fan Speed switch (the default), a scene sets fan auto on each unit unless
+it turns that unit's switch on. If a scene should hold a speed, edit it to include the
+switch turned on. If a scene takes a unit out of auto, check whether it turns the switch
+on. With `fixedFanSpeedSwitch: false`, a scene sets the speed it captured. See
+[Fan auto and scenes](#fan-auto-and-scenes).
+
+In the log, `[FAN] <unit>: <rule> -> "<speed>"` is the fan setting each request resolved
+to and the rule that chose it, for example
+`[FAN] Living Room: scene replay without Fixed Fan Speed -> "auto"`.
 
 ### A unit shows "0% Humidity"
 

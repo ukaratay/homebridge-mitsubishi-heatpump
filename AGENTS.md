@@ -13,8 +13,9 @@ One Homebridge dynamic platform (`src/platform.ts`) owns the cloud client
 
 - Each unit is a **HeaterCooler** (on/off is `Active`, setpoints are the two threshold
   characteristics, there is no `TargetTemperature`) plus a linked **Fanv2** for speed and
-  fan-auto, `SwingMode` on the HeaterCooler, and opt-in `Slats` / `HumiditySensor` / Dry /
-  Fan-only services.
+  fan-auto (Eve), `SwingMode` on the HeaterCooler, a default-on **Fixed Fan Speed** `Switch`
+  (`fan-fixed`) that decides a scene's fan (`accessory.ts:resolveFanBurst`), and opt-in
+  `Slats` / `HumiditySensor` / Dry / Fan-only services.
 - Setpoint writes are snapped to the 0.5°C step nearest a whole °F by `src/temperature.ts`
   before they reach either transport. The cloud refuses any other step since 2026-10-30.
 - Updates arrive by Socket.IO first, cloud polling as fallback, LAN polling when local
