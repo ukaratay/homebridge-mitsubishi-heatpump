@@ -122,6 +122,23 @@ test('a target without dry capability skips a dry mirror', async () => {
   assert.strictEqual(sendCommandCalls.length, 0);
 });
 
+// Same guard as dry and vent, for the same reason: the adapter answers 200 to a
+// mode the unit cannot do and ignores it, and the optimistic echo then shows a
+// cooling-only target heating (and, since the power-on memory, remembers it).
+test('a cooling-only target skips a heat or auto mirror', async () => {
+  for (const operationMode of ['heat', 'autoHeat']) {
+    const { handler, sendCommandCalls, setProfile } = makeHarness();
+    setProfile(profile({ hasModeHeat: false }));
+    handler.updateFromZone(zone({ operationMode: 'cool' }));
+
+    await handler.applyMirror({ operationMode, power: 1, spHeat: 20, spCool: 23, fanSpeed: 'auto' });
+
+    assert.strictEqual(sendCommandCalls.length, 0, operationMode);
+    assert.strictEqual(await handler.getTargetHeaterCoolerState(),
+      Characteristic.TargetHeaterCoolerState.COOL, `${operationMode}: the tile is left as it was`);
+  }
+});
+
 test('vent mirror sends operationMode:vent + power + fan, no setpoint', async () => {
   const { handler, sendCommandCalls, setProfile } = makeHarness();
   setProfile(profile({ hasModeVent: true }));

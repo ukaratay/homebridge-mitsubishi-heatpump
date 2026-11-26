@@ -168,8 +168,11 @@ test('control: an ON long after the last mode write is not swallowed', async () 
   // The off's success left the cache at off, so this is an ON for an off unit.
   await handler.setActive(Characteristic.Active.ACTIVE);
 
+  // It comes back in the HEAT it was last on in. This assertion used to read
+  // 'auto': a bare ON for an off unit fell back to the default mode, which
+  // test/power-on-mode.test.ts now covers in its own right.
   assert.deepStrictEqual(
     sendCommandCalls.map((c) => c.commands),
-    [{ operationMode: 'heat' }, { operationMode: 'off' }, { operationMode: 'auto' }],
+    [{ operationMode: 'heat' }, { operationMode: 'off' }, { operationMode: 'heat' }],
   );
 });

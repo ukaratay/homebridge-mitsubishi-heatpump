@@ -94,7 +94,9 @@ controls beneath it are new. There is no way to migrate these automatically.
 characteristic, and there is no state for dehumidify or fan-only. So:
 
 - **On/off is independent of mode.** Turning a unit off does not change which mode it
-  returns to.
+  returns to: a plain "on" (the tile, Siri, the fan tile) brings it back in the heat, cool
+  or auto it was last on in, and while it is off the mode control shows that mode. Dry and
+  Fan-only are not remembered this way; they are turned on with their own switches.
 - **Setpoints are the two thresholds.** The Home app shows the heating threshold in Heat,
   the cooling threshold in Cool, and both as a band in Auto. Modes the unit's profile says
   it cannot do are removed from the picker.

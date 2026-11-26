@@ -50,6 +50,12 @@ const VANE_TILT: ReadonlyArray<{ vane: VaneDirection; angle: number }> = [
 ];
 const TILT_STEP = 45;
 
+/** A mode the unit can be ON in, in the form it is sent. */
+type ActiveMode = 'heat' | 'cool' | 'auto' | 'dry' | 'vent';
+
+/** A mode the climate tile's own picker can show, and so can turn the unit on in. */
+type PowerOnMode = 'heat' | 'cool' | 'auto';
+
 export class KumoThermostatAccessory {
   private service: Service;
 
@@ -881,7 +887,11 @@ export class KumoThermostatAccessory {
         humidity: data.humidity ?? null,
         power: data.power!,
         operationMode: data.operationMode!,
-        previousOperationMode: data.operationMode!,
+        // The unit's own memory of the mode it was last on in (docs/protocol.md).
+        // Only device_update carries it; it seeds the power-on mode, see
+        // lastActiveMode.
+        previousOperationMode:
+          (data as { previousOperationMode?: string }).previousOperationMode || data.operationMode!,
         fanSpeed: data.fanSpeed || 'auto',
         airDirection: data.airDirection || 'auto',
         connected: true,
@@ -1260,6 +1270,8 @@ export class KumoThermostatAccessory {
       };
 
       this.currentStatus = status;
+      this.rememberActiveMode();
+      this.seedActiveMode(zone.adapter.previousOperationMode);
       // Both setpoints, not one "target": on HeaterCooler each threshold is the
       // setpoint for its own mode and the band is live in AUTO, so there is no
       // single target temperature to name.
@@ -1402,14 +1414,20 @@ export class KumoThermostatAccessory {
    * (that is `Active`) and nothing for dry or fan-only. Dry and vent report COOL
    * so the tile stays coherent while their dedicated switches drive them; dry
    * genuinely belongs there, since its setpoint lives in spCool.
+   *
+   * An off unit shows the mode it will come back on in, not a default.
    */
   private mapToTargetHeaterCoolerState(status: DeviceStatus): number {
     const C = this.platform.Characteristic.TargetHeaterCoolerState;
+    // While the unit is off, the mode a bare ON will turn it on in. See lastActiveMode.
+    const mode = this.toActiveMode(status.operationMode) && status.power === 1
+      ? status.operationMode
+      : this.lastActiveMode();
 
-    if (this.isAutoMode(status.operationMode)) {
+    if (this.isAutoMode(mode)) {
       return C.AUTO;
     }
-    if (status.operationMode === 'heat') {
+    if (mode === 'heat') {
       return C.HEAT;
     }
     // cool, dry, vent, and anything unrecognised.
@@ -1553,9 +1571,8 @@ export class KumoThermostatAccessory {
   /**
    * Turn the unit on or off, independently of its mode.
    *
-   * Turning ON restores the mode the unit was last in rather than picking one:
-   * `previousOperationMode` is what the hardware itself remembers, and HomeKit
-   * sends Active=1 with no mode of its own.
+   * Turning ON restores the mode the unit was last on in rather than picking
+   * one: HomeKit sends Active=1 with no mode of its own. See lastActiveMode.
    */
   async setActive(value: CharacteristicValue): Promise<void> {
     const on = value === this.platform.Characteristic.Active.ACTIVE;
@@ -1578,10 +1595,10 @@ export class KumoThermostatAccessory {
     if (!on) {
       operationMode = 'off';
     } else {
-      const remembered = this.currentStatus?.operationMode;
-      operationMode = remembered && remembered !== 'off'
-        ? this.normalizeSendMode(remembered)
-        : this.defaultOnMode();
+      // The cached mode is only usable while the cache still shows the unit on
+      // (an off in flight). Once it is off the cache says 'off', which is where
+      // the remembered mode comes in.
+      operationMode = this.toActiveMode(this.currentStatus?.operationMode) ?? this.lastActiveMode();
     }
 
     this.platform.log.info(
@@ -1629,15 +1646,84 @@ export class KumoThermostatAccessory {
     }
   }
 
-  /** Collapse a reported mode (autoHeat/autoCool) to one the API accepts on send. */
-  private normalizeSendMode(mode: string): 'heat' | 'cool' | 'auto' | 'dry' | 'vent' {
+  /** `mode` as a mode the unit can be on in, or null for 'off', missing or unknown. */
+  private toActiveMode(mode: string | null | undefined): ActiveMode | null {
+    if (!mode) {
+      return null;
+    }
     if (this.isAutoMode(mode)) {
       return 'auto';
     }
-    if (mode === 'heat' || mode === 'cool' || mode === 'dry' || mode === 'vent') {
-      return mode;
+    return mode === 'heat' || mode === 'cool' || mode === 'dry' || mode === 'vent' ? mode : null;
+  }
+
+  /** `mode` as one the climate tile's picker can show, or null. */
+  private toPowerOnMode(mode: string | null | undefined): PowerOnMode | null {
+    const active = this.toActiveMode(mode);
+    return active === 'heat' || active === 'cool' || active === 'auto' ? active : null;
+  }
+
+  /**
+   * The mode a plain "on" turns the unit on in: the heat, cool or auto it was
+   * last on in.
+   *
+   * An off unit reports `operationMode: 'off'`, so the cached status cannot say
+   * what to come back as, and until this existed every tile tap, "turn on" to
+   * Siri and fan-tile ON brought an off unit up in AUTO, whatever it had been
+   * doing. That also broke the mode picker: Home shows Off / Heat / Cool / Auto,
+   * and choosing the mode the tile already displays sends Active=1 alone, so
+   * picking "Cool" on an off unit whose target read COOL turned it on in AUTO.
+   * mapToTargetHeaterCoolerState therefore shows this same mode while the unit is
+   * off: what the picker displays is what a bare ON delivers.
+   *
+   * That rule is why Dry and Fan-only are NOT remembered here. The picker cannot
+   * show them (both read as COOL while they run), so a unit last on in Dry would
+   * show Cool and come back dehumidifying. They are excursions made with their
+   * own switches; the tile returns to the heat, cool or auto from before them.
+   *
+   * The profile is applied when the value is READ, not only when it is stored: a
+   * unit that cannot heat never comes back in heat or auto, whatever a mirror
+   * push, the unit's own memory, or a value cached before the profile arrived
+   * put here. The adapter answers HTTP 200 to a mode it cannot do and ignores it,
+   * so that unit could otherwise no longer be turned on with a bare ON at all.
+   *
+   * Kept in accessory.context, which Homebridge writes with the accessory cache,
+   * so it survives a restart without a write of our own. When there is nothing
+   * remembered yet it is seeded from `previousOperationMode`, the unit's own
+   * memory of its last mode, which only device_update carries. Found by reading
+   * homebridge-mitsubishi-comfort 36dae3e ("the fork turned every off unit on in
+   * AUTO"), which keeps a similar memory.
+   */
+  private lastActiveMode(): PowerOnMode {
+    const remembered = this.toPowerOnMode(this.accessory.context.lastActiveMode);
+    const cannotHeat = this.deviceProfile !== null && !this.deviceProfile.hasModeHeat;
+    if (!remembered || (cannotHeat && remembered !== 'cool')) {
+      return this.defaultOnMode();
     }
-    return 'cool';
+    return remembered;
+  }
+
+  /** Record the mode of a unit that is on. Called wherever the cached status changes. */
+  private rememberActiveMode(): void {
+    const status = this.currentStatus;
+    if (!status || status.power !== 1) {
+      return;
+    }
+    const mode = this.toPowerOnMode(status.operationMode);
+    if (mode) {
+      this.accessory.context.lastActiveMode = mode;
+    }
+  }
+
+  /** Take the unit's own remembered mode when we have none of our own. */
+  private seedActiveMode(previousOperationMode: string | null | undefined): void {
+    if (this.accessory.context.lastActiveMode) {
+      return;
+    }
+    const mode = this.toPowerOnMode(previousOperationMode);
+    if (mode) {
+      this.accessory.context.lastActiveMode = mode;
+    }
   }
 
   /** Mode to use when HomeKit says "on" and we have nothing remembered. */
@@ -1725,6 +1811,10 @@ export class KumoThermostatAccessory {
    * heat/cool/auto or when the unit is off.
    */
   private refreshClimateCharacteristics(): void {
+    // Every power or mode change we make ourselves ends here, so this is where a
+    // command's mode is remembered; updates from the unit go through
+    // processZoneUpdate. Before the reachability check: the cache changed either way.
+    this.rememberActiveMode();
     // Unreachable: the cache is updated, but HomeKit stays in No Response.
     if (!this.currentStatus || !this.isReachable()) {
       return;
@@ -2572,6 +2662,12 @@ export class KumoThermostatAccessory {
     }
     if (mode === 'vent' && this.deviceProfile && !this.deviceProfile.hasModeVent) {
       this.platform.log.warn(`[MIRROR] ${this.accessory.displayName}: target has no vent mode — skipping`);
+      return;
+    }
+    // The adapter answers 200 to a mode the unit cannot do and ignores it, so the
+    // echo below would show a cooling-only target heating.
+    if ((mode === 'heat' || mode === 'auto') && this.deviceProfile && !this.deviceProfile.hasModeHeat) {
+      this.platform.log.warn(`[MIRROR] ${this.accessory.displayName}: target cannot heat — skipping ${mode}`);
       return;
     }
 
