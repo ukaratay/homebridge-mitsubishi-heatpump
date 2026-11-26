@@ -117,10 +117,13 @@ site: the vendor API we do not control, and the user-facing manual.
 **Do not add a Matter accessory graph.** Homebridge's Matter fan behaviour routes only
 `fanMode` and `percentSetting` to a plugin; it has no rocking or airflow-direction
 handlers, so vane and swing are structurally unreachable over Matter — and vane control
-is the reason this plugin exists. Re-checked against Homebridge 2.4.0 on 2026-10-09:
-2.4.0 added `api.matter.deviceRequirements` (a plugin can compose its own cluster
-features, including a `RoomAirConditioner`), but `FanControlBehavior` still reacts to
-those two attributes only. Apple Home also drops Dry and Fan-only for a Matter AC.
+is the reason this plugin exists. Re-checked against Homebridge 2.5.0 and 2.5.1-beta.11
+on 2026-11-25: 2.4.0 added `api.matter.deviceRequirements` (a plugin can compose its own
+cluster features, including a `RoomAirConditioner`) and 2.5.0 applies the FanControl
+`Auto` feature, so fan auto alone would now reach a plugin, but `FanControlBehavior`
+still reacts to those two attributes only. A Matter accessory is also a second,
+separately paired device, not another view of the HAP one. Apple Home also drops Dry and
+Fan-only for a Matter AC.
 A full blocker-by-blocker analysis with re-verification commands was written on 2026-07-27
 and then deleted, because it was pinned to Homebridge internals that will churn long
 before Matter is viable. Recover it if the question comes up again:
