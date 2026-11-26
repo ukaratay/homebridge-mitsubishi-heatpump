@@ -101,7 +101,7 @@ answers within 2.5 minutes, the stream is reconnected.
 | `sensor_update` | A paired wireless sensor's temperature, humidity and battery |
 | `adapter_update` | Adapter firmware and RSSI. Formerly also the local-control password |
 | `device_status_v2` | Connected / disconnected. A disconnect turns the unit's tiles into No Response |
-| `acoil_update` | Outdoor unit. Minimal, debug-logged |
+| `acoil_update` | Outdoor unit. Minimal; the plugin does not subscribe to it |
 
 `operationMode` is **sent** as `'auto'` but **returned** as `'autoHeat'` or `'autoCool'`.
 

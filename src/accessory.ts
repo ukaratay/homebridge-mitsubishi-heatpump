@@ -8,6 +8,15 @@ import {
 import { cToF, quantizeSetpointInRange, sameSetpoint } from './temperature';
 
 /**
+ * The unit-state fields processZoneUpdate reads, whichever transport delivered
+ * them: the zones poll passes its adapter record as is, streaming and local build
+ * one. Zone id and serial are not in it: the serial is this accessory's own.
+ */
+type UnitReading = Pick<Adapter,
+  'roomTemp' | 'spHeat' | 'spCool' | 'spAuto' | 'humidity' | 'power' | 'operationMode' |
+  'previousOperationMode' | 'fanSpeed' | 'airDirection' | 'rssi'>;
+
+/**
  * Fan speed <-> HomeKit RotationSpeed, on the Fanv2 service.
  *
  * The slider carries ONLY the five named airflow levels, evenly spaced across the
@@ -951,37 +960,25 @@ export class KumoThermostatAccessory {
 
     this.platform.log.debug(`Streaming update received for ${deviceSerial}: temp=${data.roomTemp}, mode=${data.operationMode}, power=${data.power}`);
 
-    // Convert streaming data format to zone format for processing
-    const zoneUpdate: Partial<Zone> = {
-      adapter: {
-        id: data.id || '',
-        deviceSerial: deviceSerial,
-        roomTemp: data.roomTemp!,
-        spHeat: data.spHeat!,
-        spCool: data.spCool!,
-        spAuto: data.spAuto || null,
-        humidity: data.humidity ?? null,
-        power: data.power!,
-        operationMode: data.operationMode!,
-        // The unit's own memory of the mode it was last on in (docs/protocol.md).
-        // Only device_update carries it; it seeds the power-on mode, see
-        // lastActiveMode.
-        previousOperationMode:
-          (data as { previousOperationMode?: string }).previousOperationMode || data.operationMode!,
-        fanSpeed: data.fanSpeed || 'auto',
-        airDirection: data.airDirection || 'auto',
-        connected: true,
-        isSimulator: false,
-        hasSensor: data.humidity !== null && data.humidity !== undefined,
-        hasMhk2: false,
-        scheduleOwner: 'adapter',
-        scheduleHoldEndTime: 0,
-        rssi: data.rssi,
-      },
-    } as Zone;
-
-    // Use existing update processing logic
-    this.processZoneUpdate(zoneUpdate as Zone, 'streaming', updateTimestamp);
+    // Use existing update processing logic. device_update carries no zone id, so
+    // keep the last one known.
+    this.processZoneUpdate(this.currentStatus?.id || '', {
+      roomTemp: data.roomTemp!,
+      spHeat: data.spHeat!,
+      spCool: data.spCool!,
+      spAuto: data.spAuto || null,
+      humidity: data.humidity ?? null,
+      power: data.power!,
+      operationMode: data.operationMode!,
+      // The unit's own memory of the mode it was last on in (docs/protocol.md).
+      // Only device_update carries it; it seeds the power-on mode, see
+      // lastActiveMode.
+      previousOperationMode:
+        (data as { previousOperationMode?: string }).previousOperationMode || data.operationMode!,
+      fanSpeed: data.fanSpeed || 'auto',
+      airDirection: data.airDirection || 'auto',
+      rssi: data.rssi,
+    }, 'streaming', updateTimestamp);
 
     // Extract extended fields only available from streaming (not in Zone format)
     if (this.currentStatus) {
@@ -1163,7 +1160,7 @@ export class KumoThermostatAccessory {
   public updateFromZone(zone: Zone) {
     this.applyZoneSensors(zone.adapter);
     const updateTimestamp = Date.now();
-    this.processZoneUpdate(zone, 'polling', updateTimestamp);
+    this.processZoneUpdate(zone.id, zone.adapter, 'polling', updateTimestamp);
   }
 
   /**
@@ -1182,32 +1179,18 @@ export class KumoThermostatAccessory {
       return;
     }
     const updateTimestamp = Date.now();
-    const zoneUpdate: Partial<Zone> = {
-      id: this.currentStatus?.id || '',
-      adapter: {
-        id: this.currentStatus?.id || '',
-        deviceSerial: this.deviceSerial,
-        roomTemp: status.roomTemp!,
-        spHeat: status.spHeat!,
-        spCool: status.spCool!,
-        spAuto: status.spAuto ?? null,
-        humidity: status.humidity ?? this.currentStatus?.humidity ?? null,
-        power: status.power!,
-        operationMode: status.operationMode!,
-        previousOperationMode: status.operationMode!,
-        fanSpeed: status.fanSpeed || 'auto',
-        airDirection: status.airDirection || 'auto',
-        connected: true,
-        isSimulator: false,
-        hasSensor: (status.humidity ?? this.currentStatus?.humidity) !== null &&
-          (status.humidity ?? this.currentStatus?.humidity) !== undefined,
-        hasMhk2: false,
-        scheduleOwner: 'adapter',
-        scheduleHoldEndTime: 0,
-      },
-    } as Zone;
-
-    this.processZoneUpdate(zoneUpdate as Zone, 'local', updateTimestamp);
+    this.processZoneUpdate(this.currentStatus?.id || '', {
+      roomTemp: status.roomTemp!,
+      spHeat: status.spHeat!,
+      spCool: status.spCool!,
+      spAuto: status.spAuto ?? null,
+      humidity: status.humidity ?? this.currentStatus?.humidity ?? null,
+      power: status.power!,
+      operationMode: status.operationMode!,
+      previousOperationMode: status.operationMode!,
+      fanSpeed: status.fanSpeed || 'auto',
+      airDirection: status.airDirection || 'auto',
+    }, 'local', updateTimestamp);
 
     // Filter / defrost / standby come straight from the local status.
     if (this.currentStatus) {
@@ -1254,7 +1237,12 @@ export class KumoThermostatAccessory {
     return this.kumoAPI.sendCommand(this.deviceSerial, commands);
   }
 
-  private processZoneUpdate(zone: Zone, source: 'streaming' | 'polling' | 'local', timestamp: number) {
+  private processZoneUpdate(
+    zoneId: string,
+    reading: UnitReading,
+    source: 'streaming' | 'polling' | 'local',
+    timestamp: number,
+  ) {
     try {
       // When local control is healthy, it is the authoritative status source: drop
       // cloud (streaming/polling) updates that would clobber fresher local data,
@@ -1292,9 +1280,9 @@ export class KumoThermostatAccessory {
       this.platform.log.debug(`Processing ${source} update for ${this.deviceSerial}`);
 
       // Validate required fields
-      if (zone.adapter.roomTemp === undefined || zone.adapter.roomTemp === null) {
-        this.platform.log.error(`Device ${this.deviceSerial} has invalid roomTemp: ${zone.adapter.roomTemp}`);
-        this.platform.log.debug('Zone adapter data:', JSON.stringify(zone.adapter));
+      if (reading.roomTemp === undefined || reading.roomTemp === null) {
+        this.platform.log.error(`Device ${this.deviceSerial} has invalid roomTemp: ${reading.roomTemp}`);
+        this.platform.log.debug('Zone adapter data:', JSON.stringify(reading));
         return;
       }
 
@@ -1308,10 +1296,10 @@ export class KumoThermostatAccessory {
       const sensorFresh = this.sensorReadingFresh();
       const effectiveRoomTemp = sensorFresh && this.sensorTemp !== null
         ? this.sensorTemp
-        : zone.adapter.roomTemp;
+        : reading.roomTemp;
       const effectiveHumidity = sensorFresh && this.sensorHumidity !== null
         ? this.sensorHumidity
-        : zone.adapter.humidity;
+        : reading.humidity;
 
       // Check if device has a humidity reading and add the sensor service if so.
       // CurrentRelativeHumidity is NOT a valid characteristic on HeaterCooler
@@ -1331,11 +1319,11 @@ export class KumoThermostatAccessory {
 
       // Convert adapter data to DeviceStatus format
       const status: DeviceStatus = {
-        id: zone.id,
-        deviceSerial: zone.adapter.deviceSerial,
-        rssi: zone.adapter.rssi || 0,
-        power: zone.adapter.power,
-        operationMode: zone.adapter.operationMode,
+        id: zoneId,
+        deviceSerial: this.deviceSerial,
+        rssi: reading.rssi || 0,
+        power: reading.power,
+        operationMode: reading.operationMode,
         humidity: effectiveHumidity,
         // The zones payload carries neither fan speed nor vane (they live in the
         // streaming `device_update` and in GET /devices/{serial}); both are optional
@@ -1345,12 +1333,12 @@ export class KumoThermostatAccessory {
         // HomeKit each time, and changed mirror.ts's signature, so every
         // alternation between the two update sources pushed fan 'auto' to mirror
         // targets. The streaming and local paths always fill both fields.
-        fanSpeed: zone.adapter.fanSpeed || this.currentStatus?.fanSpeed || 'auto',
-        airDirection: zone.adapter.airDirection || this.currentStatus?.airDirection || 'auto',
+        fanSpeed: reading.fanSpeed || this.currentStatus?.fanSpeed || 'auto',
+        airDirection: reading.airDirection || this.currentStatus?.airDirection || 'auto',
         roomTemp: effectiveRoomTemp,
-        spCool: zone.adapter.spCool,
-        spHeat: zone.adapter.spHeat,
-        spAuto: zone.adapter.spAuto,
+        spCool: reading.spCool,
+        spHeat: reading.spHeat,
+        spAuto: reading.spAuto,
         // The sensor battery is in no zone/streaming payload — it arrives only on
         // sensor_update — so carry it across this rebuild of the status object.
         sensorBattery: this.currentStatus?.sensorBattery ?? null,
@@ -1370,7 +1358,7 @@ export class KumoThermostatAccessory {
 
       this.currentStatus = status;
       this.rememberActiveMode();
-      this.seedActiveMode(zone.adapter.previousOperationMode);
+      this.seedActiveMode(reading.previousOperationMode);
       // Both setpoints, not one "target": on HeaterCooler each threshold is the
       // setpoint for its own mode and the band is live in AUTO, so there is no
       // single target temperature to name.
@@ -2523,8 +2511,9 @@ export class KumoThermostatAccessory {
    * Only an explicit statement removes it: `hasSensor === false`, no MHK2, and no
    * reading in the record. A reading that is merely missing never does (see the
    * note in processZoneUpdate). And only the real zones record may be passed in:
-   * the streaming and local paths fill hasSensor from the humidity field, so they
-   * say nothing about the hardware.
+   * it is the only source that states hasSensor and hasMhk2. The streaming and
+   * local paths carry a UnitReading, which has neither, so they say nothing about
+   * the hardware.
    *
    * While the record says there is no source, a humidity in device_update does
    * not re-create the tile. Without that, a stream that still carried one for
