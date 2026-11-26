@@ -2,7 +2,7 @@ import { Service, PlatformAccessory, CharacteristicValue } from 'homebridge';
 import { KumoV3Platform } from './platform';
 import { KumoAPI } from './kumo-api';
 import {
-  DeviceStatus, DeviceProfile, Zone, Commands, MirrorState, SensorReading,
+  Adapter, DeviceStatus, DeviceProfile, Zone, Commands, MirrorState, SensorReading,
   FanSpeed, FAN_SPEEDS, VaneDirection, isVaneDirection, normalizeFanSpeed,
 } from './settings';
 import { cToF, quantizeSetpointInRange, sameSetpoint } from './temperature';
@@ -63,6 +63,9 @@ export class KumoThermostatAccessory {
   private siteId: string;
   private currentStatus: DeviceStatus | null = null;
   private hasHumiditySensor: boolean = false;
+  // The cloud's zone record said this unit has nothing to read humidity from.
+  // While set, no reading creates the humidity tile. See applyZoneSensors.
+  private humiditySourceAbsent = false;
   private lastUpdateTimestamp: number = 0;
   private lastUpdateSource: 'streaming' | 'polling' | 'local' | 'none' = 'none';
   private lastLocalUpdateTs: number = 0;
@@ -412,13 +415,19 @@ export class KumoThermostatAccessory {
     if (typeof humidity === 'number' && !isNaN(humidity)) {
       this.sensorHumidity = humidity;
       this.sensorReadingTs = Date.now();
+      // A reading from the unit's own paired sensor proves there is a sensor,
+      // whatever the zone record last said (it lags, and is not read at all with
+      // disablePolling). See applyZoneSensors.
+      if (this.isHumidityReading(humidity)) {
+        this.humiditySourceAbsent = false;
+      }
       if (this.currentStatus) {
         this.currentStatus.humidity = humidity;
       }
       // Same latch and config gate the poll path uses: opting out of the humidity
       // service must not be undone by the sensor arriving from a different event.
       if (this.platform.kumoConfig.showHumiditySensor !== false) {
-        if (!this.hasHumiditySensor) {
+        if (!this.hasHumiditySensor && this.mayCreateHumidityTile(humidity)) {
           this.hasHumiditySensor = true;
           this.setupHumidityService();
         }
@@ -1064,6 +1073,7 @@ export class KumoThermostatAccessory {
   }
 
   public updateFromZone(zone: Zone) {
+    this.applyZoneSensors(zone.adapter);
     const updateTimestamp = Date.now();
     this.processZoneUpdate(zone, 'polling', updateTimestamp);
   }
@@ -1218,17 +1228,18 @@ export class KumoThermostatAccessory {
       // Check if device has a humidity reading and add the sensor service if so.
       // CurrentRelativeHumidity is NOT a valid characteristic on HeaterCooler
       // (it was optional on Thermostat), so humidity needs its own service.
-      const hasHumidity = effectiveHumidity !== null && effectiveHumidity !== undefined;
+      const hasHumidity = this.mayCreateHumidityTile(effectiveHumidity);
       const wantHumidity = this.platform.kumoConfig.showHumiditySensor !== false;
       if (hasHumidity && wantHumidity && !this.hasHumiditySensor) {
         this.hasHumiditySensor = true;
         this.setupHumidityService();
         this.platform.log.debug(`Added humidity sensor for device ${this.deviceSerial}`);
       }
-      // Note: Once humidity is detected, we never remove the characteristic.
-      // Streaming updates may intermittently omit humidity data, but that doesn't
-      // mean the hardware sensor is gone. Toggling the characteristic destabilizes
-      // HomeKit and causes "No Response" errors.
+      // Note: a MISSING reading never removes the service. Streaming updates may
+      // intermittently omit humidity data, but that doesn't mean the hardware
+      // sensor is gone, and toggling the service destabilizes HomeKit and causes
+      // "No Response" errors. Only the cloud's zone record saying outright that
+      // the unit has no source removes it: see applyZoneSensors.
 
       // Convert adapter data to DeviceStatus format
       const status: DeviceStatus = {
@@ -2363,6 +2374,67 @@ export class KumoThermostatAccessory {
    * units report it, and the value is cloud-sourced (the local status has no
    * humidity field).
    */
+  /** A humidity value that is a real reading. 0 is what the cloud sends for "none". */
+  private isHumidityReading(humidity: unknown): humidity is number {
+    return typeof humidity === 'number' && !isNaN(humidity) && humidity > 0;
+  }
+
+  private mayCreateHumidityTile(humidity: unknown): boolean {
+    return this.isHumidityReading(humidity) && !this.humiditySourceAbsent;
+  }
+
+  /**
+   * Drop the humidity tile when the cloud's zone record says the unit has nothing
+   * to read humidity from.
+   *
+   * The tile is created on the first reading and cached with the accessory, and
+   * the getter serves 0 when there is no reading, so a unit that once had one (a
+   * wireless sensor since moved to another unit or unpaired, or a stray value)
+   * kept a tile reading "0%" for good. The only way out was showHumiditySensor
+   * false, which removes it from every unit. Seen on the owner's Family Room AC
+   * 2026-11-25; upstream saw the same after moving a sensor between rooms
+   * (homebridge-mitsubishi-comfort fc73d52, 2026-09-28), which this follows.
+   *
+   * Only an explicit statement removes it: `hasSensor === false`, no MHK2, and no
+   * reading in the record. A reading that is merely missing never does (see the
+   * note in processZoneUpdate). And only the real zones record may be passed in:
+   * the streaming and local paths fill hasSensor from the humidity field, so they
+   * say nothing about the hardware.
+   *
+   * While the record says there is no source, a humidity in device_update does
+   * not re-create the tile. Without that, a stream that still carried one for
+   * the unit would add the service again and the next poll would remove it, and
+   * every such flip is a structural change HomeKit has to re-read.
+   *
+   * A reading from the unit's own paired sensor (sensor_update) is different: it
+   * is direct evidence of a sensor, so it lifts that hold, and while one is fresh
+   * the record cannot remove the tile. A sensor newly paired to this unit gets
+   * its tile at once, and one moved away loses it once its readings go stale.
+   */
+  public applyZoneSensors(adapter: Adapter): void {
+    const sensorSpeaking = this.sensorReadingFresh() && this.isHumidityReading(this.sensorHumidity);
+    const absent = adapter.hasSensor === false && adapter.hasMhk2 !== true &&
+      !this.isHumidityReading(adapter.humidity) && !sensorSpeaking;
+    if (!absent) {
+      this.humiditySourceAbsent = false;
+      return;
+    }
+    this.humiditySourceAbsent = true;
+
+    const existing = this.accessory.getService(this.platform.Service.HumiditySensor);
+    if (!existing) {
+      return;
+    }
+    this.accessory.removeService(existing);
+    this.humidityService = null;
+    this.hasHumiditySensor = false;
+    this.publishStructureChange();
+    this.platform.log.info(
+      `${this.accessory.displayName}: removed the humidity tile — the cloud reports no ` +
+      'sensor or MHK2 for this unit. It comes back by itself if one is paired.',
+    );
+  }
+
   private setupHumidityService(): void {
     if (this.humidityService) {
       return;

@@ -38,11 +38,12 @@ type ProfilePayload = Partial<DeviceProfile>;
 const ALL_ON: Partial<KumoConfig> =
   { showDrySwitch: true, showFanOnlySwitch: true, exposeVaneSlat: true };
 
-function makeHarness(kumoConfig: Partial<KumoConfig> = ALL_ON) {
+function makeHarness(kumoConfig: Partial<KumoConfig> = ALL_ON, existingAccessory?: FakeAccessory) {
   // Each element is the array handed to updatePlatformAccessories, so the length
   // of `updates` is the publish count — which is what every assertion below reads.
   const updates: FakeAccessory[][] = [];
   let profileCb: ((serial: string, profile: ProfilePayload) => void) | null = null;
+  let streamCb: ((serial: string, data: Record<string, unknown>) => void) | null = null;
   const config: Partial<KumoConfig> = { ...kumoConfig };
   const platform = {
     Service,
@@ -52,10 +53,12 @@ function makeHarness(kumoConfig: Partial<KumoConfig> = ALL_ON) {
     kumoConfig: config,
   };
   const kumoAPI = {
-    subscribeToDevice() {},
+    subscribeToDevice(_serial: string, cb: (serial: string, data: Record<string, unknown>) => void) {
+      streamCb = cb;
+    },
     onDeviceProfileUpdate(cb: (serial: string, profile: ProfilePayload) => void) { profileCb = cb; },
   };
-  const accessory = makeAccessory('Living room');
+  const accessory = existingAccessory ?? makeAccessory('Living room');
   const handler = new KumoThermostatAccessory(
     platform as never,
     accessory as never,
@@ -74,6 +77,11 @@ function makeHarness(kumoConfig: Partial<KumoConfig> = ALL_ON) {
     // A profile listener is registered in the constructor; if it ever stops being
     // registered this blows up loudly instead of quietly testing nothing.
     applyProfile: (p: ProfilePayload) => profileCb!(SERIAL, p),
+    // A device_update as the cloud's stream delivers it.
+    stream: (data: Record<string, unknown>) => streamCb!(SERIAL, {
+      deviceSerial: SERIAL, roomTemp: 22, spHeat: 20, spCool: 24, power: 1, operationMode: 'cool',
+      fanSpeed: 'auto', airDirection: 'auto', humidity: null, ...data,
+    }),
   };
 }
 
@@ -257,6 +265,117 @@ test('the humidity service is published only once, not on every reading', () => 
     52,
     'later readings still update the existing service',
   );
+});
+
+// ---- a humidity tile that outlived its sensor --------------------------------
+//
+// The tile is created on the first reading and cached with the accessory, and
+// the getter serves 0 when there is no reading. A unit whose wireless sensor was
+// moved to another unit, or unpaired, therefore kept a tile reading "0%" for
+// good: seen on the owner's Family Room AC (2026-11-25), and by upstream after
+// moving a sensor between rooms (homebridge-mitsubishi-comfort fc73d52). The only
+// way out was showHumiditySensor false, which removes it from every unit.
+//
+// The cloud's zone record says outright whether a unit has a source. That, and
+// only that, removes the tile.
+
+const NO_SENSOR = { hasSensor: false, hasMhk2: false, humidity: null };
+
+test('the zone record saying there is no sensor removes a cached humidity tile and publishes it', () => {
+  const { handler, accessory, updates } = makeHarness();
+  handler.updateFromZone(zone({ humidity: 51 }));
+  assert.ok(accessory.getService(Service.HumiditySensor), 'the tile exists');
+  const before = updates.length;
+
+  handler.updateFromZone(zone(NO_SENSOR));
+
+  assert.strictEqual(accessory.getService(Service.HumiditySensor), null, 'the stale tile is gone');
+  assert.strictEqual(updates.length, before + 1, 'removed with exactly one publish');
+
+  handler.updateFromZone(zone(NO_SENSOR));
+  assert.strictEqual(updates.length, before + 1, 'and not re-published on every poll');
+});
+
+// The cached-accessory case: the tile is already there when the process starts,
+// and the platform hands the first zone record to applyZoneSensors at discovery.
+test('a humidity tile restored from the cache is removed as soon as the zone record is seen', () => {
+  const first = makeHarness();
+  first.handler.updateFromZone(zone({ humidity: 51 }));
+
+  const second = makeHarness(ALL_ON, first.accessory);
+  assert.ok(second.accessory.getService(Service.HumiditySensor), 'adopted from the cache');
+  second.handler.applyZoneSensors(zone(NO_SENSOR).adapter);
+
+  assert.strictEqual(second.accessory.getService(Service.HumiditySensor), null);
+  assert.strictEqual(second.updates.length, 1);
+});
+
+test('a zone record reporting 0% with no sensor removes the tile too', () => {
+  // 0 is what the cloud sends for "none"; a real room is never at 0% RH.
+  const { handler, accessory } = makeHarness();
+  handler.updateFromZone(zone({ humidity: 51 }));
+
+  handler.updateFromZone(zone({ hasSensor: false, hasMhk2: false, humidity: 0 }));
+
+  assert.strictEqual(accessory.getService(Service.HumiditySensor), null);
+});
+
+// Everything short of that explicit statement leaves the tile alone. A missing
+// reading is not "no sensor": streaming updates omit humidity all the time, and
+// removing and re-adding a service is a structural change HomeKit has to re-read.
+test('nothing short of an explicit "no sensor" removes the humidity tile', () => {
+  const keeps: Array<[string, Record<string, unknown>]> = [
+    ['a reading that is merely missing', { humidity: null }],
+    ['a record that says nothing about sensors', { humidity: null, hasSensor: undefined }],
+    ['a paired wireless sensor', { hasSensor: true, hasMhk2: false, humidity: null }],
+    ['an MHK2 wall controller', { hasSensor: false, hasMhk2: true, humidity: null }],
+    ['a record that still carries a reading', { hasSensor: false, hasMhk2: false, humidity: 48 }],
+  ];
+  for (const [why, adapter] of keeps) {
+    const { handler, accessory, updates, stream } = makeHarness();
+    // The first stream update publishes once for its own reasons (the filter
+    // service), so it is taken before the baseline.
+    stream({ humidity: 51 });
+    const before = updates.length;
+
+    handler.updateFromZone(zone(adapter));
+    stream({ humidity: null });
+
+    assert.ok(accessory.getService(Service.HumiditySensor), `kept for ${why}`);
+    assert.strictEqual(updates.length, before, `no structural publish for ${why}`);
+  }
+});
+
+test('a humidity of 0 does not create the tile', () => {
+  const { handler, accessory, updates, stream } = makeHarness();
+  stream({ humidity: null });            // the stream's own first-update publish
+  const before = updates.length;
+
+  handler.updateFromZone(zone({ humidity: 0 }));
+  stream({ humidity: 0 });
+
+  assert.strictEqual(accessory.getService(Service.HumiditySensor), null);
+  assert.strictEqual(updates.length, before);
+});
+
+// Without this the tile would flap: a stream that still carried a humidity for
+// the unit re-created the service, and the next poll removed it again.
+test('while the cloud says there is no sensor, a reading from the stream does not bring the tile back', () => {
+  const { handler, accessory, updates, stream } = makeHarness();
+  stream({ humidity: 51 });
+  handler.updateFromZone(zone(NO_SENSOR));
+  const after = updates.length;
+
+  stream({ humidity: 47 });
+  assert.strictEqual(accessory.getService(Service.HumiditySensor), null, 'the zone record is the authority');
+  assert.strictEqual(updates.length, after);
+
+  // A sensor is paired again: the record changes, and the next reading creates it.
+  handler.updateFromZone(zone({ hasSensor: true, hasMhk2: false, humidity: null }));
+  stream({ humidity: 47 });
+  assert.ok(accessory.getService(Service.HumiditySensor), 'back once the cloud reports a sensor');
+  assert.strictEqual(
+    accessory.getService(Service.HumiditySensor)!.chars.get(Characteristic.CurrentRelativeHumidity)?.value, 47);
 });
 
 // ---- swing ----------------------------------------------------------------
