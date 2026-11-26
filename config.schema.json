@@ -65,11 +65,17 @@
         "default": false,
         "description": "Add a separate Fan-only switch tile per unit. Off by default. Note this is fan-ONLY mode (the unit runs its fan with no heating or cooling); adjusting fan speed while heating or cooling is done on the main tile and does not need this switch. Only added on units whose profile reports vent support."
       },
+      "fixedFanSpeedSwitch": {
+        "title": "Show Fixed Fan Speed switch",
+        "type": "boolean",
+        "default": true,
+        "description": "Add a Fixed Fan Speed switch per unit with an auto fan, named after the unit (for example \"Living Room Fixed Fan Speed\"). On by default. The switch is on while the unit runs at a fixed speed and off otherwise, including while the unit is off. Turning it off sets fan auto; turning it on holds the slider's speed. A Home scene sets fan auto for a unit unless it turns that unit's switch on, so to make a scene hold a speed, set the slider and include the switch turned on. Turn this option off to remove the switch: scenes then replay the fan speed and mode they captured, as in 2.3.1."
+      },
       "exposeVaneSlat": {
         "title": "Expose vane as a Slat service",
         "type": "boolean",
         "default": false,
-        "description": "Expose vane direction as a HomeKit Slats service, giving discrete tilt positions. OFF by default: Apple Home categorises Slats as a WINDOW COVERING, so these tiles join the blinds/shades grouping in your rooms and a room-level blinds control can reach your louvres. Swing on/off is always available on the main climate tile regardless of this setting. Only enable if you want fixed vane angles and accept them appearing among your window coverings."
+        "description": "Expose vane direction as a HomeKit Slats service, giving discrete tilt positions. OFF by default: Apple Home categorises Slats as a WINDOW COVERING, so these tiles join the blinds/shades grouping in your rooms and a room-level blinds control can reach your louvres. Swing on/off is always available on the main climate tile regardless of this setting, and swing off sets the vane to auto, so this is the only way to set a fixed angle from Home. Only enable if you want fixed vane angles and accept them appearing among your window coverings."
       },
       "excludeDevices": {
         "title": "Hide Device IDs",
@@ -172,6 +178,7 @@
       "expanded": false,
       "items": [
         "showHumiditySensor",
+        "fixedFanSpeedSwitch",
         "showDrySwitch",
         "showFanOnlySwitch",
         "exposeVaneSlat"

@@ -47,8 +47,11 @@ function makeHarness() {
   return h;
 }
 
-// Fan writes are coalesced onto the next tick (see queueFanIntent), so a test has
-// to let that tick run before asserting what was sent.
+// A request's fan writes are resolved together on the next tick (see noteBurst
+// and resolveFanBurst), so a test has to let that tick run before asserting what
+// was sent. These call the handlers directly, so no request here carries a
+// HeaterCooler write: they are the slider, Siri and Eve cases. Scene replays are
+// in fixed-fan-switch.test.ts.
 const tick = () => new Promise((r) => setTimeout(r, 5));
 
 const zone = (over: Record<string, unknown> = {}): Zone => ({
@@ -229,11 +232,10 @@ test('moving the slider leaves auto', async () => {
     'picking a speed is inherently manual — the toggle follows once the write lands');
 });
 
-test('an explicit AUTO beats a speed sent in the same burst', async () => {
-  // HomeKit delivers a scene as ONE write request and hap-nodejs dispatches every
-  // handler in it concurrently without awaiting. A scene that sets "fan auto"
-  // also re-sends its captured RotationSpeed, so before the writes were coalesced
-  // whichever handler finished last won and auto landed in manual at random.
+test('a lone AUTO beats a speed sent in the same request', async () => {
+  // HomeKit delivers a request's writes to hap-nodejs, which dispatches every
+  // handler in it without awaiting. Sent one by one, whichever handler finished
+  // last won and auto landed in manual at random. Eve sends this pair.
   const { handler, sendCommandCalls } = makeHarness();
   handler.updateFromZone(zone({ fanSpeed: 'quiet' }));
 
@@ -245,10 +247,10 @@ test('an explicit AUTO beats a speed sent in the same burst', async () => {
 
   assert.strictEqual(sendCommandCalls.length, 1, 'the burst collapses to one command');
   assert.deepStrictEqual(sendCommandCalls[0].commands, { fanSpeed: 'auto' },
-    'the explicit auto wins over the speed the scene happened to carry');
+    'the explicit auto wins over the speed beside it');
 });
 
-test('the same burst in the other order still resolves to auto', async () => {
+test('the same request in the other order still resolves to auto', async () => {
   const { handler, sendCommandCalls } = makeHarness();
   handler.updateFromZone(zone({ fanSpeed: 'quiet' }));
 
@@ -365,10 +367,10 @@ test('a vane write refused behind an off puts SwingMode back too', async () => {
     Characteristic.SwingMode.SWING_DISABLED);
 });
 
-// The handlers log what each characteristic was sent. A scene sends several that
-// disagree, and what the request resolved to is the line that says whether fan
-// auto held.
-test('the log says what a burst of fan writes resolved to', async () => {
+// The handlers log what each characteristic was sent. A request can carry
+// several that disagree, and what it resolved to, and by which rule, is the line
+// that says whether fan auto held.
+test('the log says what a request\'s fan writes resolved to', async () => {
   const { handler } = makeHarness();
   handler.updateFromZone(zone({ fanSpeed: 'low' }));
   const lines: string[] = [];
@@ -381,7 +383,7 @@ test('the log says what a burst of fan writes resolved to', async () => {
   await tick();
 
   assert.deepStrictEqual(lines.filter((l) => l.includes('->') && !l.includes('HomeKit sent')),
-    ['[FAN] Bedroom: -> "auto"']);
+    ['[FAN] Bedroom: Fan Mode auto -> "auto"']);
 });
 
 // Resolved fan writes run from a bare setTimeout, where nothing above them catches.

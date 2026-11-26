@@ -17,7 +17,9 @@
 // Since the HeaterCooler migration the switches are ALSO config-gated
 // (showDrySwitch / showFanOnlySwitch, both opt-in; exposeVaneSlat, opt-in), so
 // each add/remove branch is now driven by capability AND config. Both gates route
-// through the same setup*/remove* pair, so both must publish.
+// through the same setup*/remove* pair, so both must publish. The Fixed Fan
+// Speed switch is on by default on a unit with an auto fan; its publish tests
+// are in fixed-fan-switch.test.ts, and the profiles here report no auto fan.
 
 import test from 'node:test';
 import assert from 'node:assert';
@@ -150,8 +152,8 @@ test('the setpoint range is logged when it changes, not on every profile heartbe
 // Fan speed and dehumidify used to have nowhere to live on a Thermostat tile, so
 // both switches were published for every capable unit. On HeaterCooler fan speed
 // is RotationSpeed on the main tile, so the fan-only switch is a niche control and
-// both switches became opt-in. A capable device with no opt-in must publish
-// NOTHING: an unwanted switch is as much a bug as a missing one, and a stray
+// both switches became opt-in. A capable device with no opt-in (and no auto fan,
+// which would bring the default-on Fixed Fan Speed switch) must publish NOTHING: an unwanted switch is as much a bug as a missing one, and a stray
 // publish alone bumps the HomeKit config number for no structural change.
 test('a capable device publishes no switches when the config has not opted in', () => {
   const { accessory, updates, applyProfile } = makeHarness({});

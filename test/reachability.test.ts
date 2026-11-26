@@ -53,6 +53,7 @@ function makeHarness({
 }
 
 const ALL_SERVICES: Partial<KumoConfig> = {
+  // The Fixed Fan Speed switch is on by default.
   showDrySwitch: true, showFanOnlySwitch: true, exposeVaneSlat: true,
 };
 
@@ -71,7 +72,7 @@ function shownValues(h: ReturnType<typeof makeHarness>): Array<[string, unknown]
       C.HeatingThresholdTemperature, C.CoolingThresholdTemperature, C.SwingMode,
     ]),
     ...pick('fan', fan, [C.Active, C.CurrentFanState, C.RotationSpeed, C.TargetFanState]),
-    ...['fan-only', 'dry'].flatMap((subtype) =>
+    ...['fan-only', 'dry', 'fan-fixed'].flatMap((subtype) =>
       pick(subtype, h.accessory.getServiceById(Service.Switch, subtype), [C.On])),
     ...pick('slats', h.accessory.getService(Service.Slats),
       [C.CurrentSlatState, C.CurrentTiltAngle, C.TargetTiltAngle]),
@@ -200,14 +201,14 @@ test('reachability still degrades correctly without hap on the platform api', as
 // homebridge-mitsubishi-comfort 8b65144): an offline unit's fan tile read "on and
 // blowing" from the cloud's frozen record, beside a climate tile showing No
 // Response. Our climate tile was gated; the fan, the vane, the switches and the
-// filter were not.
+// filter were not, and the extra switches were missing from the push altogether.
 
 test('going offline puts No Response on every service the unit has', async () => {
   const h = makeHarness({ kumoConfig: ALL_SERVICES });
   h.applyProfile();
   h.stream({ displayConfig: { filter: true } });     // creates the filter indicator too
   const before = shownValues(h);
-  assert.strictEqual(before.length, 17, 'every optional service is present');
+  assert.strictEqual(before.length, 18, 'every optional service is present');
   assert.deepStrictEqual(before.filter(([, v]) => v === undefined || v instanceof Error), [],
     'and every one of them is showing a real value');
 
@@ -265,14 +266,14 @@ test('a fan or vane write to an offline unit is sent but does not repaint its ti
   await h.handler.setSwingMode(Characteristic.SwingMode.SWING_ENABLED);
   await tick();
 
-  // The vane write goes out at once; the fan write is queued to the next tick.
-  assert.deepStrictEqual(h.sent, [{ vaneDir: 'swing' }, { fanSpeed: 'superPowerful' }]);
+  assert.deepStrictEqual(h.sent, [{ fanSpeed: 'superPowerful' }, { vaneDir: 'swing' }]);
   const live = shownValues(h).filter(([, v]) => !(v instanceof Error)).map(([name]) => name);
   assert.deepStrictEqual(live, []);
 });
 
 // Gating the push must not gate the memory: what the unit was last told is what
-// "swing off" and "fan manual" go back to once it is reachable again.
+// "fan manual" goes back to, and the angle the Slats tilt shows in vane auto,
+// once it is reachable again.
 test('what was set while offline is still remembered afterwards', async () => {
   const h = makeHarness({ kumoConfig: ALL_SERVICES });
   h.applyProfile();
@@ -287,14 +288,16 @@ test('what was set while offline is still remembered afterwards', async () => {
   await h.handler.setSwingMode(Characteristic.SwingMode.SWING_ENABLED);
   await tick();
   await h.handler.setSwingMode(Characteristic.SwingMode.SWING_DISABLED);
+  await tick();
   await h.handler.setTargetFanState(Characteristic.TargetFanState.AUTO);
   await tick();
   await h.handler.setTargetFanState(Characteristic.TargetFanState.MANUAL);
   await tick();
 
   assert.deepStrictEqual(h.sent, [
-    { vaneDir: 'swing' }, { vaneDir: 'vertical' }, { fanSpeed: 'auto' }, { fanSpeed: 'superPowerful' },
+    { vaneDir: 'swing' }, { vaneDir: 'auto' }, { fanSpeed: 'auto' }, { fanSpeed: 'superPowerful' },
   ]);
+  assert.strictEqual(await h.handler.getTargetTiltAngle(), 90, 'auto shows the last fixed angle, set while offline');
 });
 
 // The same, without waiting for recovery: writes keep going out while the unit

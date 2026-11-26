@@ -76,6 +76,89 @@ type ActiveMode = 'heat' | 'cool' | 'auto' | 'dry' | 'vent';
 /** A mode the climate tile's own picker can show, and so can turn the unit on in. */
 type PowerOnMode = 'heat' | 'cool' | 'auto';
 
+/** The fan writes of one HAP request. See resolveFanBurst. */
+export interface FanWrites {
+  /** RotationSpeed: the slider. */
+  speed?: FanSpeed;
+  /** TargetFanState: Fan Mode, drawn by Eve but not by Apple Home. */
+  mode?: 'auto' | 'manual';
+  /** The Fixed Fan Speed switch. */
+  manual?: boolean;
+}
+
+/** The vane writes of one HAP request. See resolveVane. */
+interface VaneWrites {
+  /** SwingMode: Oscillate ON (true) or OFF (false). */
+  swing?: boolean;
+  /** The Slats tilt. */
+  tilt?: VaneDirection;
+}
+
+/**
+ * The writes of one HAP request, collected before any is sent. See noteBurst.
+ * `climate` is true once a HeaterCooler characteristic was written in it.
+ */
+interface Burst {
+  climate: boolean;
+  fan: FanWrites;
+  vane: VaneWrites;
+}
+
+/**
+ * The one fan value a request asks for, and the rule that chose it, or null
+ * when it carried no fan write. Pure, so the rules can be read and tested here.
+ *
+ * Why a request is read as a whole. Apple Home draws no Fan Mode for this fan:
+ * on the owner's iPhone on 2026-11-25 the unit page showed the fan only as a
+ * speed slider, with no Fan Mode on the page or behind its cog, and the
+ * Accessories list showed only the AC and the humidity sensor; on 2026-11-26
+ * Fan Mode was again not offered behind the unit's cog. Yet every Home scene
+ * replays the TargetFanState and RotationSpeed it captured, so a deliberate
+ * speed and an incidental one arrive as the same bytes. HAP puts no auto
+ * carrier on HeaterCooler, so the only control a scene includes or leaves out
+ * on purpose is a Switch: the Fixed Fan Speed tile. If a later Home version
+ * offers Fan Mode in the scene editor, a captured TargetFanState is deliberate
+ * again, and the tile and the replay rule below can go.
+ *
+ * The rules, in order:
+ *  1. The tile was written: On holds the request's speed (a tap carries none,
+ *     and flushBurst gives it the slider's), Off is fan auto.
+ *  2. TargetFanState together with a HeaterCooler write is a Home scene or
+ *     automation replaying what it captured. With the tile present that means
+ *     fan auto, because the scene did not turn the tile on. Without the tile
+ *     (fixedFanSpeedSwitch: false) it is the 2.3.1 rule: as rule 3.
+ *  3. A lone TargetFanState (Eve, Siri "fan to auto") is honoured: AUTO is
+ *     auto, MANUAL is the request's speed or the last manual one.
+ *  4. A lone speed (a slider drag, Siri, Shortcuts) is that speed. A drag may
+ *     pair it with a TargetFanState, but never with a HeaterCooler write, so
+ *     rule 2 does not catch it.
+ */
+export function resolveFanBurst(
+  fan: FanWrites,
+  climate: boolean,
+  hasFixedFanSwitch: boolean,
+  lastManualFan: FanSpeed,
+): { speed: FanSpeed; rule: string } | null {
+  if (fan.manual !== undefined) {
+    return fan.manual
+      ? { speed: fan.speed ?? lastManualFan, rule: 'Fixed Fan Speed on' }
+      : { speed: 'auto', rule: 'Fixed Fan Speed off' };
+  }
+  if (fan.mode !== undefined) {
+    if (climate && hasFixedFanSwitch) {
+      return { speed: 'auto', rule: 'scene replay without Fixed Fan Speed' };
+    }
+    return {
+      speed: fan.mode === 'auto' ? 'auto' : (fan.speed ?? lastManualFan),
+      rule: `${climate ? 'scene replay, ' : ''}Fan Mode ${fan.mode}`,
+    };
+  }
+  if (fan.speed !== undefined) {
+    return { speed: fan.speed, rule: 'slider speed' };
+  }
+  return null;
+}
+
 export class KumoThermostatAccessory {
   private service: Service;
 
@@ -143,9 +226,8 @@ export class KumoThermostatAccessory {
   private slatsService: Service | null = null;
   private humidityService: Service | null = null;
   private modelNumberSet: boolean = false;
-  // SwingMode is a toggle, but the device stores one vane field. Turning swing
-  // off has to restore *something*, so remember the last fixed position the unit
-  // was actually seen in and go back to that ('auto' until we've seen one).
+  // The last fixed angle the unit was seen at, which the Slats tilt shows while
+  // the vane is in auto or swinging (see shownTilt).
   private lastFixedVane: VaneDirection = 'auto';
   // SwingMode is only registered on units whose profile reports vane swing, so
   // track that rather than probing the service for the characteristic.
@@ -153,12 +235,13 @@ export class KumoThermostatAccessory {
   private fanService: Service | null = null;
   // TargetFanState is a toggle, but the device stores one fan field whose values
   // include 'auto'. Switching back to MANUAL has to pick a speed, so remember the
-  // last real one the unit was seen at. Mirrors lastFixedVane.
+  // last real one the unit was seen at. The slider shows it while in auto.
   private lastManualFan: FanSpeed = 'quiet';
-  // Fan writes arriving in one HAP request are coalesced; see queueFanIntent.
-  private pendingFan: { auto?: boolean; speed?: FanSpeed } | null = null;
-  private fanFlushTimer: NodeJS.Timeout | null = null;
   private targetFanStateRegistered = false;
+  // The Fixed Fan Speed switch; see setupFixedFanSwitch and resolveFanBurst.
+  private fixedFanService: Service | null = null;
+  // The fan, vane and climate writes of the HAP request in progress; see noteBurst.
+  private burst: Burst | null = null;
   // Timestamp (ms) of the most recent HomeKit "off" request. Within
   // OFF_SUPPRESS_WINDOW_MS of it, setpoint writes are suppressed (cached + echoed
   // but not sent). An "AC off" scene captures each thermostat's full state and
@@ -254,6 +337,23 @@ export class KumoThermostatAccessory {
       );
     }
 
+    // Switches that never shipped in a release but may sit in the cache of a
+    // build from this branch. Removed rather than bound: their jobs went to the
+    // Fixed Fan Speed switch (fan auto) and SwingMode OFF (vane auto). Only a
+    // restored accessory carries them, and the platform's
+    // updatePlatformAccessories for cached accessories persists the removal, as
+    // it does for the Thermostat above.
+    const retired = ['fan-auto', 'vane-auto']
+      .map((subtype) => this.accessory.getServiceById(this.platform.Service.Switch, subtype))
+      .filter((svc): svc is Service => Boolean(svc));
+    if (retired.length > 0) {
+      retired.forEach((svc) => this.accessory.removeService(svc));
+      this.platform.log.info(
+        `${accessory.context.device.displayName}: removed the retired Fan Auto / Vane Auto switches; ` +
+        'Fixed Fan Speed off now sets fan auto and Oscillate off sets vane auto.',
+      );
+    }
+
     this.service = this.accessory.getService(this.platform.Service.HeaterCooler) ||
       this.accessory.addService(this.platform.Service.HeaterCooler);
 
@@ -263,16 +363,19 @@ export class KumoThermostatAccessory {
     );
 
     // --- required ---
+    // The HeaterCooler setters are bound through climateWrite, which marks the
+    // request for resolveFanBurst. setActive itself does not mark: setFanActive
+    // calls it, and a fan ON is not a climate write.
     this.service.getCharacteristic(this.platform.Characteristic.Active)
       .onGet(this.getActive.bind(this))
-      .onSet(this.setActive.bind(this));
+      .onSet(this.climateWrite(this.setActive));
 
     this.service.getCharacteristic(this.platform.Characteristic.CurrentHeaterCoolerState)
       .onGet(this.getCurrentHeaterCoolerState.bind(this));
 
     this.service.getCharacteristic(this.platform.Characteristic.TargetHeaterCoolerState)
       .onGet(this.getTargetHeaterCoolerState.bind(this))
-      .onSet(this.setTargetHeaterCoolerState.bind(this));
+      .onSet(this.climateWrite(this.setTargetHeaterCoolerState));
 
     this.service.getCharacteristic(this.platform.Characteristic.CurrentTemperature)
       .onGet(this.getCurrentTemperature.bind(this));
@@ -295,12 +398,12 @@ export class KumoThermostatAccessory {
     this.service.getCharacteristic(this.platform.Characteristic.HeatingThresholdTemperature)
       .setProps(wideThresholdProps)
       .onGet(this.getHeatingThresholdTemperature.bind(this))
-      .onSet(this.setHeatingThresholdTemperature.bind(this));
+      .onSet(this.climateWrite(this.setHeatingThresholdTemperature));
 
     this.service.getCharacteristic(this.platform.Characteristic.CoolingThresholdTemperature)
       .setProps(wideThresholdProps)
       .onGet(this.getCoolingThresholdTemperature.bind(this))
-      .onSet(this.setCoolingThresholdTemperature.bind(this));
+      .onSet(this.climateWrite(this.setCoolingThresholdTemperature));
 
     // --- fan ---
     // Fan speed lives on a Fanv2 service, not here. See setupFanService. Swing
@@ -354,6 +457,17 @@ export class KumoThermostatAccessory {
     const cachedFilter = this.accessory.getService(this.platform.Service.FilterMaintenance);
     if (cachedFilter) {
       this.adoptFilterMaintenance(cachedFilter);
+    }
+
+    // And for a cached Fixed Fan Speed switch (see setupFixedFanSwitch). Opted
+    // out, it is removed here, not at the first profile: bound until then, a
+    // scene that captured it would still be resolved by it. The platform's
+    // updatePlatformAccessories persists the removal, as for the retired switches.
+    const cachedFixedFan = this.accessory.getServiceById(this.platform.Service.Switch, 'fan-fixed');
+    if (cachedFixedFan && this.platform.kumoConfig.fixedFanSpeedSwitch === false) {
+      this.accessory.removeService(cachedFixedFan);
+    } else if (cachedFixedFan) {
+      this.setupFixedFanSwitch();
     }
 
     // Cached Slats and Humidity services need their handlers re-bound now too.
@@ -618,7 +732,7 @@ export class KumoThermostatAccessory {
       // rendering reason, so it is precedent for the layout, not evidence for it.
       this.service.getCharacteristic(C.SwingMode)
         .onGet(this.getSwingMode.bind(this))
-        .onSet(this.setSwingMode.bind(this));
+        .onSet(this.climateWrite(this.setSwingMode));
       this.swingModeRegistered = true;
       // Strip a SwingMode left on the fan service by the version that moved it.
       if (this.fanService) {
@@ -659,6 +773,13 @@ export class KumoThermostatAccessory {
       this.removeDrySwitch();
     }
 
+    // The Fixed Fan Speed switch: on by default, only on a unit with an auto fan.
+    if (profile.hasFanSpeedAuto && this.platform.kumoConfig.fixedFanSpeedSwitch !== false) {
+      this.setupFixedFanSwitch();
+    } else {
+      this.removeFixedFanSwitch();
+    }
+
     // A profile that arrives while the unit is offline may just have created
     // services. They get the error too, rather than sitting at HAP's defaults
     // beside tiles that read No Response.
@@ -692,6 +813,8 @@ export class KumoThermostatAccessory {
       this.accessory.addService(this.platform.Service.Switch, switchName, 'fan-only');
 
     this.fanOnlyService.setCharacteristic(this.platform.Characteristic.Name, switchName);
+    // Declared first: see the note on ConfiguredName in setupFanService.
+    this.fanOnlyService.addOptionalCharacteristic(this.platform.Characteristic.ConfiguredName);
     this.fanOnlyService.setCharacteristic(this.platform.Characteristic.ConfiguredName, switchName);
 
     this.fanOnlyService.getCharacteristic(this.platform.Characteristic.On)
@@ -803,6 +926,8 @@ export class KumoThermostatAccessory {
       this.accessory.addService(this.platform.Service.Switch, switchName, 'dry');
 
     this.dryService.setCharacteristic(this.platform.Characteristic.Name, switchName);
+    // Declared first: see the note on ConfiguredName in setupFanService.
+    this.dryService.addOptionalCharacteristic(this.platform.Characteristic.ConfiguredName);
     this.dryService.setCharacteristic(this.platform.Characteristic.ConfiguredName, switchName);
 
     this.dryService.getCharacteristic(this.platform.Characteristic.On)
@@ -838,6 +963,87 @@ export class KumoThermostatAccessory {
       );
     }
     this.dryService = null;
+  }
+
+  // ---- Fixed Fan Speed switch ----------------------------------------------
+  //
+  // Named "<unit> Fixed Fan Speed", subtype fan-fixed. It reads On only while the
+  // unit is on at a known fixed speed, and Off otherwise, including while the
+  // unit is off: upstream found the Home app counts any switch that is on as
+  // the unit being on (homebridge-mitsubishi-comfort 545f718). Tapping it On
+  // holds the slider's speed; Off sends fan auto. In a scene, On pins the
+  // scene's slider speed and Off, or leaving it out, means fan auto. Why the
+  // tile exists at all is at resolveFanBurst.
+
+  private setupFixedFanSwitch(): void {
+    if (this.fixedFanService) {
+      return;
+    }
+    const C = this.platform.Characteristic;
+    const existing = this.accessory.getServiceById(this.platform.Service.Switch, 'fan-fixed');
+
+    let service = existing;
+    if (!service) {
+      // Named once, at creation. A cached switch keeps whatever it is called now,
+      // so a name given to it in the Home app survives a restart.
+      const switchName = `${this.accessory.context.device.displayName} Fixed Fan Speed`;
+      service = this.accessory.addService(this.platform.Service.Switch, switchName, 'fan-fixed');
+      service.setCharacteristic(C.Name, switchName);
+      // Declared first: see the note on ConfiguredName in setupFanService.
+      service.addOptionalCharacteristic(C.ConfiguredName);
+      service.setCharacteristic(C.ConfiguredName, switchName);
+    }
+    service.getCharacteristic(C.On)
+      .onGet(this.getFixedFanOn.bind(this))
+      .onSet(this.setFixedFanOn.bind(this));
+    this.fixedFanService = service;
+    if (this.isReachable()) {
+      service.updateCharacteristic(C.On, this.isFixedFanOn(this.currentStatus));
+    }
+
+    // Created from the async profile event, after the accessory was published;
+    // same re-publish requirement as the Dry / Fan-only switches.
+    if (!existing) {
+      this.publishStructureChange();
+      this.platform.log.debug(`Added Fixed Fan Speed switch for ${this.accessory.displayName}`);
+    }
+  }
+
+  private removeFixedFanSwitch(): void {
+    const existing = this.accessory.getServiceById(this.platform.Service.Switch, 'fan-fixed');
+    if (existing) {
+      this.accessory.removeService(existing);
+      this.publishStructureChange();
+      this.platform.log.debug(`Removed Fixed Fan Speed switch for ${this.accessory.displayName}`);
+    }
+    this.fixedFanService = null;
+  }
+
+  private isUnitOn(status: DeviceStatus | null): status is DeviceStatus {
+    return status !== null &&
+      this.mapToActive(status) === this.platform.Characteristic.Active.ACTIVE;
+  }
+
+  /** What the Fixed Fan Speed switch shows: on only while the unit is on at a known fixed speed. */
+  private isFixedFanOn(status: DeviceStatus | null): boolean {
+    if (!this.isUnitOn(status)) {
+      return false;
+    }
+    const known = normalizeFanSpeed(status.fanSpeed);
+    return known !== undefined && known !== 'auto';
+  }
+
+  async getFixedFanOn(): Promise<CharacteristicValue> {
+    this.assertReachable();
+    return this.isFixedFanOn(this.currentStatus);
+  }
+
+  async setFixedFanOn(value: CharacteristicValue): Promise<void> {
+    const on = value === true;
+    this.platform.log.info(
+      `[FAN] ${this.accessory.displayName}: HomeKit sent Fixed Fan Speed ${on ? 'ON' : 'OFF'}`,
+    );
+    this.noteBurst({ fan: { manual: on } });
   }
 
   private isDryActive(status: DeviceStatus | null): boolean {
@@ -1143,7 +1349,7 @@ export class KumoThermostatAccessory {
         this.fanService.updateCharacteristic(C.TargetFanState, err);
       }
     }
-    for (const sw of [this.fanOnlyService, this.dryService]) {
+    for (const sw of [this.fanOnlyService, this.dryService, this.fixedFanService]) {
       sw?.updateCharacteristic(C.On, err);
     }
     if (this.slatsService) {
@@ -1897,7 +2103,7 @@ export class KumoThermostatAccessory {
   }
 
   /**
-   * Push Active, both state characteristics and the Dry / Fan-only switches from
+   * Push Active, both state characteristics and the mode switches from
    * the current cached status. The switches are derived here rather than flipped
    * by each setter: fan-only and dry are mutually exclusive, and both are off in
    * heat/cool/auto or when the unit is off.
@@ -1919,6 +2125,8 @@ export class KumoThermostatAccessory {
       C.TargetHeaterCoolerState, this.mapToTargetHeaterCoolerState(this.currentStatus));
     this.fanOnlyService?.updateCharacteristic(C.On, this.isFanOnlyActive(this.currentStatus));
     this.dryService?.updateCharacteristic(C.On, this.isDryActive(this.currentStatus));
+    // Power-gated too, so it has to follow every on/off, not only a fan change.
+    this.fixedFanService?.updateCharacteristic(C.On, this.isFixedFanOn(this.currentStatus));
   }
 
   /**
@@ -1955,9 +2163,11 @@ export class KumoThermostatAccessory {
     this.fanService = existing ||
       this.accessory.addService(this.platform.Service.Fanv2, name, 'airflow');
     // Name only. ConfiguredName is NOT in Fanv2's required or optional set, and
-    // adding it makes Homebridge log a characteristic warning on every start
-    // ("Adding anyway"). The same is true of Switch, so the Dry/Fan-only switches
-    // inherited from upstream will warn too if they are enabled.
+    // setting it makes hap-nodejs log "Characteristic not in required or optional
+    // characteristic section ... Adding anyway." Switch lacks it too, so the
+    // switches that do set it (Fixed Fan Speed, Dry, Fan-only: a name the user
+    // sees in Home) declare it with addOptionalCharacteristic first, which
+    // silences the warning and still sets the name.
     this.fanService.setCharacteristic(C.Name, name);
     // Simply not setting it does not remove one a previous version already
     // persisted into the accessory cache, so strip it explicitly.
@@ -2064,8 +2274,9 @@ export class KumoThermostatAccessory {
       return (FAN_SPEEDS.indexOf(this.lastManualFan) - 1) * FAN_PCT_STEP;
     }
     if (known === 'auto') {
-      // In auto the slider shows the last real speed observed. TargetFanState is
-      // what actually tells the user the unit is choosing for itself.
+      // In auto the slider shows the last real speed observed. TargetFanState (Eve)
+      // and the Fixed Fan Speed switch (Apple Home) tell the user the unit is
+      // choosing for itself.
       return (FAN_SPEEDS.indexOf(this.lastManualFan) - 1) * FAN_PCT_STEP;
     }
     return (FAN_SPEEDS.indexOf(known) - 1) * FAN_PCT_STEP;
@@ -2135,8 +2346,7 @@ export class KumoThermostatAccessory {
 
   private currentFanState(): number {
     const C = this.platform.Characteristic.CurrentFanState;
-    if (!this.currentStatus ||
-        this.mapToActive(this.currentStatus) === this.platform.Characteristic.Active.INACTIVE) {
+    if (!this.isUnitOn(this.currentStatus)) {
       return C.INACTIVE;
     }
     // Standby means the compressor is idle: the unit is on but not working.
@@ -2152,52 +2362,101 @@ export class KumoThermostatAccessory {
   }
 
   async setTargetFanState(value: CharacteristicValue): Promise<void> {
-    const C = this.platform.Characteristic.TargetFanState;
+    const auto = value === this.platform.Characteristic.TargetFanState.AUTO;
     this.platform.log.info(
-      `[FAN] ${this.accessory.displayName}: HomeKit sent ` +
-      `${value === C.AUTO ? 'AUTO' : 'MANUAL'}`,
+      `[FAN] ${this.accessory.displayName}: HomeKit sent ${auto ? 'AUTO' : 'MANUAL'}`,
     );
-    this.queueFanIntent({ auto: value === C.AUTO });
+    this.noteBurst({ fan: { mode: auto ? 'auto' : 'manual' } });
   }
 
   /**
-   * Collect the fan writes of a single HAP request before sending anything.
-   *
-   * HomeKit sends a scene as ONE write request carrying several characteristics,
-   * and hap-nodejs dispatches every handler in that request concurrently without
-   * awaiting (Accessory.js runs `handleCharacteristicWrite(...).then(...)` in a
-   * plain loop). A scene that sets "fan auto" also re-sends the captured
-   * RotationSpeed, so whichever handler ran last used to win: setting auto landed
-   * in manual roughly at random. Buffering to the next tick makes the pair one
-   * intent, and an explicit AUTO beats the mode merely implied by a slider value.
+   * Wrap a HeaterCooler setter so it marks the request's burst as a climate
+   * write before it runs, synchronously, ahead of any await in the setter. The
+   * mark is only an input to resolveFanBurst (rule 2). A plain assignment, so it
+   * cannot throw; the setter still sends whatever the unit's reachability.
    */
-  private queueFanIntent(patch: { auto?: boolean; speed?: FanSpeed }): void {
-    this.pendingFan = { ...(this.pendingFan ?? {}), ...patch };
-    if (this.fanFlushTimer) {
+  private climateWrite(set: (value: CharacteristicValue) => Promise<void>) {
+    return (value: CharacteristicValue): Promise<void> => {
+      this.noteBurst({ climate: true });
+      return set.call(this, value);
+    };
+  }
+
+  /**
+   * Collect the fan, vane and climate writes of a single HAP request, then send
+   * one fan value and one vane value for it.
+   *
+   * HomeKit sends a scene as ONE write request carrying several
+   * characteristics, and hap-nodejs dispatches every handler in it in one
+   * synchronous loop without awaiting (Accessory.js runs
+   * `handleCharacteristicWrite(...).then(...)` in a plain loop). Each handler
+   * adds to the burst synchronously and the first schedules one setTimeout(0),
+   * so by the time it runs the whole request is in. Within a field the last
+   * write wins. The fan and the vane are each one device field behind several
+   * characteristics; sent one by one, whichever reached the unit last won.
+   */
+  private noteBurst(patch: { climate?: true; fan?: FanWrites; vane?: VaneWrites }): void {
+    if (!this.burst) {
+      this.burst = { climate: false, fan: {}, vane: {} };
+      setTimeout(() => this.flushBurst(), 0);
+    }
+    if (patch.climate) {
+      this.burst.climate = true;
+    }
+    Object.assign(this.burst.fan, patch.fan);
+    Object.assign(this.burst.vane, patch.vane);
+  }
+
+  /**
+   * Resolve and send a burst. Runs from a bare setTimeout, so nothing in it may
+   * throw: the resolution is pure and each write is caught (queuedWriteFailed).
+   * A burst holding only the climate mark sends nothing.
+   */
+  private flushBurst(): void {
+    const burst = this.burst;
+    this.burst = null;
+    // Defensive: noteBurst schedules one flush per burst, so this never runs
+    // today, but a throw from a bare setTimeout would take the bridge down.
+    if (!burst) {
       return;
     }
-    this.fanFlushTimer = setTimeout(() => {
-      this.fanFlushTimer = null;
-      const intent = this.pendingFan;
-      this.pendingFan = null;
-      if (!intent) {
-        return;
-      }
-      // Explicit AUTO wins over any speed in the same burst; otherwise the speed
-      // (or, for a bare MANUAL, the last real speed the unit was seen at).
-      const speed: FanSpeed = intent.auto === true
-        ? 'auto'
-        : (intent.speed ?? this.lastManualFan);
-      // What the request resolved to, at info: the handlers above only log what
-      // each characteristic was sent, and a scene sends several that disagree.
-      this.platform.log.info(`[FAN] ${this.accessory.displayName}: -> "${speed}"`);
-      this.writeFanSpeed(speed).catch((err) => this.queuedWriteFailed('FAN SPEED', err));
-    }, 0);
+    const name = this.accessory.displayName;
+    const held = [
+      burst.climate && 'climate',
+      burst.fan.speed !== undefined && 'speed',
+      burst.fan.mode !== undefined && 'mode',
+      burst.fan.manual !== undefined && 'tile',
+      burst.vane.swing !== undefined && 'swing',
+      burst.vane.tilt !== undefined && 'tilt',
+    ].filter(Boolean);
+    this.platform.log.debug(`[BURST] ${name}: held ${held.join(', ')}`);
+
+    // A tap On with no speed in the request holds the speed the slider shows.
+    // That is not always lastManualFan: a drag HAP has stored but the unit has
+    // not yet confirmed has moved the slider, not lastManualFan.
+    const shown = this.fanService?.getCharacteristic(this.platform.Characteristic.RotationSpeed).value;
+    if (burst.fan.manual === true && burst.fan.speed === undefined && typeof shown === 'number') {
+      burst.fan.speed = this.rotationToFanSpeed(shown);
+    }
+    const fan = resolveFanBurst(
+      burst.fan, burst.climate, this.fixedFanService !== null, this.lastManualFan);
+    if (fan) {
+      // What the request resolved to, and by which rule, at info: the handlers
+      // only log what each characteristic was sent, and a scene sends several
+      // that disagree.
+      this.platform.log.info(`[FAN] ${name}: ${fan.rule} -> "${fan.speed}"`);
+      this.writeFanSpeed(fan.speed).catch((err) => this.queuedWriteFailed('FAN SPEED', err));
+    }
+    const vane = this.resolveVane(burst.vane);
+    if (vane) {
+      this.platform.log.info(`[VANE] ${name}: -> "${vane}"`);
+      this.writeVane(vane, 'VANE').catch((err) => this.queuedWriteFailed('VANE', err));
+    }
   }
 
   /**
-   * A queued fan write runs from a bare setTimeout, where nothing above it
-   * catches: a rejection there would be an unhandled one. Both transports
+   * A queued fan or vane write runs from a bare setTimeout, where nothing above
+   * it catches: a rejection there would be an unhandled one. Both transports
    * report failure by returning false, so this is a backstop, not a code path.
    */
   private queuedWriteFailed(label: string, err: unknown): void {
@@ -2221,10 +2480,9 @@ export class KumoThermostatAccessory {
     this.platform.log.info(
       `[FAN SPEED] ${this.accessory.displayName}: HomeKit sent ${pct} -> "${fanSpeed}"`,
     );
-    // Deliberately NOT force-pushing MANUAL here: that is what let a scene's
-    // trailing speed override an explicit AUTO in the same burst. queueFanIntent
-    // resolves the two together.
-    this.queueFanIntent({ speed: fanSpeed });
+    // Not sent from here: a scene carries this beside TargetFanState and the
+    // Fixed Fan Speed switch, and resolveFanBurst decides between them.
+    this.noteBurst({ fan: { speed: fanSpeed } });
   }
 
   /** Send a fan speed and reconcile the fan characteristics. */
@@ -2288,6 +2546,7 @@ export class KumoThermostatAccessory {
     // Pushed, not only served on read: recovery from No Response has to put a
     // value back on every characteristic pushUnreachable put the error on.
     this.fanService.updateCharacteristic(C.CurrentFanState, this.currentFanState());
+    this.fixedFanService?.updateCharacteristic(C.On, this.isFixedFanOn(this.currentStatus));
     if (this.currentStatus) {
       this.fanService.updateCharacteristic(C.Active, this.mapToActive(this.currentStatus));
     }
@@ -2421,14 +2680,30 @@ export class KumoThermostatAccessory {
 
   async setSwingMode(value: CharacteristicValue): Promise<void> {
     const C = this.platform.Characteristic.SwingMode;
-    // Turning swing off restores the last fixed position the unit was actually
-    // observed in, falling back to 'auto' — the device has one field, so "not
-    // swinging" has to mean some concrete position.
-    const vane: VaneDirection = value === C.SWING_ENABLED ? 'swing' : this.lastFixedVane;
-    this.platform.log.info(
-      `[VANE] ${this.accessory.displayName}: swing ${value === C.SWING_ENABLED ? 'ON' : 'OFF'} -> "${vane}"`,
-    );
-    await this.writeVane(vane, 'VANE');
+    const swing = value === C.SWING_ENABLED;
+    // OFF means vane auto, whatever the vane is doing now: see resolveVane.
+    this.platform.log.info(`[VANE] ${this.accessory.displayName}: HomeKit sent swing ${swing ? 'ON' : 'OFF'}`);
+    this.noteBurst({ vane: { swing } });
+  }
+
+  /**
+   * One vane value for a request, or null when it carried no vane write.
+   * Strongest first: swing ON, a Slats tilt, then swing OFF, which means vane auto.
+   *
+   * OFF is auto from any state, tapped or replayed, because HAP has nowhere else
+   * to put vane auto: SwingMode is a two-state toggle and the Slats tilt holds
+   * only angles. The unit stores one field, so "not swinging" has to name a
+   * value, and auto is the one no other control can reach. A fixed angle from
+   * Home goes through the opt-in Slats tilt, which beats an OFF in the same
+   * request. The cost: an angle pinned with the remote or the Mitsubishi app is
+   * undone by the next scene that includes the unit. 2.3.1 sent the last fixed
+   * angle seen since restart instead, which reset on every restart.
+   */
+  private resolveVane(vane: VaneWrites): VaneDirection | null {
+    if (vane.swing === true) {
+      return 'swing';
+    }
+    return vane.tilt ?? (vane.swing === false ? 'auto' : null);
   }
 
   async getCurrentSlatState(): Promise<CharacteristicValue> {
@@ -2445,9 +2720,9 @@ export class KumoThermostatAccessory {
   async setTargetTiltAngle(value: CharacteristicValue): Promise<void> {
     const vane = this.tiltToVane(value as number);
     this.platform.log.info(
-      `[VANE] ${this.accessory.displayName}: tilt ${value}° -> "${vane}"`,
+      `[VANE] ${this.accessory.displayName}: HomeKit sent tilt ${value}° ("${vane}")`,
     );
-    await this.writeVane(vane, 'VANE');
+    this.noteBurst({ vane: { tilt: vane } });
   }
 
   private setupSlatsService(): void {
