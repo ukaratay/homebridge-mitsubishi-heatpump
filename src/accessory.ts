@@ -2820,18 +2820,8 @@ export class KumoThermostatAccessory {
   }
 
   /** Collapse a raw source mode to a command mode (autoHeat/autoCool → auto, off if powered off). */
-  private normalizeMirrorMode(desired: MirrorState): 'off' | 'heat' | 'cool' | 'auto' | 'dry' | 'vent' {
-    if (desired.power === 0 || desired.operationMode === 'off') {
-      return 'off';
-    }
-    const m = desired.operationMode;
-    if (this.isAutoMode(m)) {
-      return 'auto';
-    }
-    if (m === 'heat' || m === 'cool' || m === 'dry' || m === 'vent') {
-      return m;
-    }
-    return 'off';
+  private normalizeMirrorMode(desired: MirrorState): 'off' | ActiveMode {
+    return desired.power === 0 ? 'off' : this.toActiveMode(desired.operationMode) ?? 'off';
   }
 
   /**
