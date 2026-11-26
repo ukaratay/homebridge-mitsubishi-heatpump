@@ -475,3 +475,57 @@ test('device_status_v2 reports each connection change once, and a throwing consu
     }
   });
 });
+
+// ---- 6. the local-password warning is for local-control installs only -------
+//
+// Every connect nudges each unit for `adapterStatus`, local control or not, and
+// since 2026-07-31 every answer comes back without a password. KumoAPI cannot see
+// localControl, so the warning used to fire on cloud-only installs too, telling the
+// user to set an option that was already off. Only the local gather's own nudge
+// (requestAdapterStatus) arms it now.
+
+/** Point `api`'s warn at a recorder. */
+function recordWarnings(api: KumoAPI): string[] {
+  const warnings: string[] = [];
+  api['log'].warn = (message: string) => {
+    warnings.push(message);
+  };
+  return warnings;
+}
+
+const PASSWORDLESS = { deviceSerial: SERIAL, firmwareVersion: '1.0', routerRssi: -50 };
+
+test('password-less adapter_updates do not warn when nothing asked for local credentials', async () => {
+  await withFakeSocket(async (socket) => {
+    const api = await streamingApi(socket);
+    const warnings = recordWarnings(api);
+    try {
+      for (let i = 0; i < 5; i++) {
+        socket.fire('adapter_update', PASSWORDLESS);
+      }
+      assert.deepStrictEqual(warnings, []);
+    } finally {
+      api.destroy();
+    }
+  });
+});
+
+test('once the local gather asks, three password-less adapter_updates warn exactly once', async () => {
+  await withFakeSocket(async (socket) => {
+    const api = await streamingApi(socket);
+    const warnings = recordWarnings(api);
+    try {
+      api.requestAdapterStatus(SERIAL);
+      socket.fire('adapter_update', PASSWORDLESS);
+      socket.fire('adapter_update', PASSWORDLESS);
+      assert.deepStrictEqual(warnings, [], 'two in a row may be a one-off');
+      for (let i = 0; i < 3; i++) {
+        socket.fire('adapter_update', PASSWORDLESS);
+      }
+      assert.strictEqual(warnings.length, 1);
+      assert.match(warnings[0], /stopped sending the per-device local password/);
+    } finally {
+      api.destroy();
+    }
+  });
+});
