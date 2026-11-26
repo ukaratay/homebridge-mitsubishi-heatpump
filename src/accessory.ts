@@ -2146,7 +2146,9 @@ export class KumoThermostatAccessory {
   async getTargetFanState(): Promise<CharacteristicValue> {
     this.assertReachable();
     const C = this.platform.Characteristic.TargetFanState;
-    return this.currentStatus?.fanSpeed === 'auto' ? C.AUTO : C.MANUAL;
+    // normalizeFanSpeed, as the push path does: some units report the capitalised
+    // `Auto`, and an exact match would read it back as MANUAL.
+    return normalizeFanSpeed(this.currentStatus?.fanSpeed ?? '') === 'auto' ? C.AUTO : C.MANUAL;
   }
 
   async setTargetFanState(value: CharacteristicValue): Promise<void> {
