@@ -139,6 +139,30 @@ test('dropping dry support removes the switch and publishes the removal', () => 
   assert.ok(updates.length > before, 'removal re-published to HomeKit');
 });
 
+// ---- the setpoint-range log line -------------------------------------------
+
+// profile_update is a heartbeat: the cloud re-sends each unit's unchanged profile
+// every few minutes. Logging the range every time put dozens of identical info
+// lines an hour between the ones that matter (upstream counted about 20 an hour
+// on five units, homebridge-mitsubishi-comfort ac1b646).
+test('the setpoint range is logged when it changes, not on every profile heartbeat', () => {
+  const { handler, applyProfile } = makeHarness({});
+  const lines: string[] = [];
+  handler['platform'].log.info = (message: string) => {
+    lines.push(message);
+  };
+  const ranges = () => lines.filter((l) => l.includes('setpoint range'));
+
+  applyProfile(profile());
+  applyProfile(profile());
+  applyProfile(profile());
+  assert.strictEqual(ranges().length, 1, 'three identical profiles, one line');
+
+  applyProfile(profile({ maximumSetPoints: { cool: 30, heat: 28, auto: 30 } }));
+  assert.strictEqual(ranges().length, 2, 'a changed range is logged again');
+  assert.match(ranges()[1], /heat 10-30/);
+});
+
 // ---- switches: config gate ------------------------------------------------
 
 // Fan speed and dehumidify used to have nowhere to live on a Thermostat tile, so

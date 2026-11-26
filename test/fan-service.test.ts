@@ -393,6 +393,25 @@ test('a vane write refused behind an off puts SwingMode back too', async () => {
     Characteristic.SwingMode.SWING_DISABLED);
 });
 
+// The handlers log what each characteristic was sent. A scene sends several that
+// disagree, and what the request resolved to is the line that says whether fan
+// auto held.
+test('the log says what a burst of fan writes resolved to', async () => {
+  const { handler } = makeHarness();
+  handler.updateFromZone(zone({ fanSpeed: 'low' }));
+  const lines: string[] = [];
+  handler['platform'].log.info = (message: string) => {
+    lines.push(message);
+  };
+
+  void handler.setRotationSpeed(100);
+  void handler.setTargetFanState(Characteristic.TargetFanState.AUTO);
+  await tick();
+
+  assert.deepStrictEqual(lines.filter((l) => l.includes('->') && !l.includes('HomeKit sent')),
+    ['[FAN] Bedroom: -> "auto"']);
+});
+
 test('the HeaterCooler is declared the primary service', () => {
   const { isPrimary } = makeLinkAwareHarness();
   assert.strictEqual(isPrimary(), true,
