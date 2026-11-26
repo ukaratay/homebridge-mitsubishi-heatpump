@@ -2191,8 +2191,20 @@ export class KumoThermostatAccessory {
       // What the request resolved to, at info: the handlers above only log what
       // each characteristic was sent, and a scene sends several that disagree.
       this.platform.log.info(`[FAN] ${this.accessory.displayName}: -> "${speed}"`);
-      void this.writeFanSpeed(speed);
+      this.writeFanSpeed(speed).catch((err) => this.queuedWriteFailed('FAN SPEED', err));
     }, 0);
+  }
+
+  /**
+   * A queued fan write runs from a bare setTimeout, where nothing above it
+   * catches: a rejection there would be an unhandled one. Both transports
+   * report failure by returning false, so this is a backstop, not a code path.
+   */
+  private queuedWriteFailed(label: string, err: unknown): void {
+    this.platform.log.error(
+      `[${label}] ${this.accessory.displayName}: write failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    this.revertSoon();
   }
 
   async getRotationSpeed(): Promise<CharacteristicValue> {
