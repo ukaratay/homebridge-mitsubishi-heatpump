@@ -870,11 +870,6 @@ export class KumoAPI {
         }
       });
 
-      this.socket.on('acoil_update', (data: any) => {
-        const serial = data.deviceSerial || 'unknown';
-        this.log.debug(`A-coil update for ${serial}`);
-      });
-
       // A paired wireless sensor reported. This is the cloud's replacement for the
       // local `{"c":{"sensors":...}}` leaf, which became unreachable when the cloud
       // stopped serving local credentials (see SensorReading in settings.ts).

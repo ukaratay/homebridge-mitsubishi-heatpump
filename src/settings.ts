@@ -132,11 +132,8 @@ export interface Adapter {
   fanSpeed?: string;
   airDirection?: string;
   connected: boolean;
-  isSimulator: boolean;
   hasSensor: boolean;
   hasMhk2: boolean;
-  scheduleOwner: string;
-  scheduleHoldEndTime: number;
   rssi?: number;
 }
 
