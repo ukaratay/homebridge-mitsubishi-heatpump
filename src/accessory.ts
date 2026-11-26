@@ -228,11 +228,6 @@ export class KumoThermostatAccessory {
     private readonly platform: KumoV3Platform,
     private readonly accessory: PlatformAccessory,
     private readonly kumoAPI: KumoAPI,
-    // Unused: polling is site-level on the platform (platform.ts:startSitePoller),
-    // and nothing per-accessory has a timer of its own. Kept because platform.ts
-    // still passes it at both construction sites; removing it is a signature
-    // change across that file and every test harness.
-    _pollIntervalSeconds?: number,
   ) {
     this.deviceSerial = this.accessory.context.device.deviceSerial;
     this.siteId = this.accessory.context.device.siteId;

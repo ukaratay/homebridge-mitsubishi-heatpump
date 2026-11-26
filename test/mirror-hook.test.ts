@@ -35,7 +35,6 @@ function makeHarness() {
     platform as never,
     makeAccessory('Source', SERIAL) as never,
     kumoAPI as never,
-    30,
   );
   return { handler };
 }

@@ -48,7 +48,7 @@ function makeHarness(accessory: FakeAccessory = makeAccessory('Family Room')) {
     },
   };
   const handler = new KumoThermostatAccessory(
-    platform as never, accessory as never, kumoAPI as never, 30,
+    platform as never, accessory as never, kumoAPI as never,
   );
   return {
     handler, accessory, sent,

@@ -63,7 +63,6 @@ function makeHarness(kumoConfig: Partial<KumoConfig> = ALL_ON, existingAccessory
     platform as never,
     accessory as never,
     kumoAPI as never,
-    30,
   );
   // Both are created by the constructor, before any profile arrives. Asserted
   // rather than optional-chained: if either stops being built the tests below

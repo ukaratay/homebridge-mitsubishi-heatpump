@@ -96,7 +96,6 @@ function makeHarness({ localClient = null }: { localClient?: FakeLocalClient | n
     platform as never,
     accessory as never,
     kumoAPI as never,
-    30,
   );
   return {
     handler, sendCommandCalls, accessory,

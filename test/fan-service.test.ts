@@ -54,7 +54,6 @@ function makeHarness() {
     platform as never,
     accessory as never,
     kumoAPI as never,
-    30,
   );
   // TargetFanState and SwingMode are capability-gated, so a realistic harness has
   // to deliver a profile before either exists.
@@ -351,7 +350,6 @@ function makeLinkAwareHarness() {
     platform as never,
     accessory as never,
     kumoAPI as never,
-    30,
   );
   return { handler, accessory, linked, isPrimary: () => primary };
 }
