@@ -68,7 +68,7 @@ test('every required entry is an array of strings naming real properties', () =>
   }
 });
 
-test('credentials and name are required, matching what the platform enforces', () => {
+test('credentials and name are required by the schema', () => {
   assert.deepStrictEqual(config.schema.required, ['name', 'username', 'password']);
 });
 

@@ -30,7 +30,7 @@ export interface KumoConfig {
   // Seconds between local status polls (default 15).
   localPollInterval?: number;
   // --- Display options -----------------------------------------------------
-  // Fan speed and vane now live on the HeaterCooler tile itself, so the two
+  // Fan speed lives on the linked Fanv2 and swing on the HeaterCooler, so the two
   // extra Switch tiles per unit are opt-in rather than automatic. They still
   // only appear on units whose profile reports the capability.
   /** Add a per-unit "Dry" switch (dehumidify). Default false. */

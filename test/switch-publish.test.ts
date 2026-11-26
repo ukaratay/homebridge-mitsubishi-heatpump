@@ -15,7 +15,7 @@
 // accessory. Before the fix, the publish count was 0.
 //
 // Since the HeaterCooler migration the switches are ALSO config-gated
-// (showDrySwitch / showFanOnlySwitch, both opt-in; exposeVaneSlat, opt-out), so
+// (showDrySwitch / showFanOnlySwitch, both opt-in; exposeVaneSlat, opt-in), so
 // each add/remove branch is now driven by capability AND config. Both gates route
 // through the same setup*/remove* pair, so both must publish.
 
