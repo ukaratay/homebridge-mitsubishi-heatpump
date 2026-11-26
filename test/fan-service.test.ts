@@ -194,6 +194,18 @@ test('auto is reported on TargetFanState, not as a speed', async () => {
     'and must NOT render as a zeroed slider, which reads as "off"');
 });
 
+// Reads are matched case-insensitively because some units report capitalised
+// values. The push path already did; the GET handler compared the raw string, so
+// a unit reporting `Auto` was pushed as AUTO and read back as MANUAL.
+test('a unit that reports the capitalised Auto still reads AUTO', async () => {
+  const { handler, fan } = makeHarness();
+  handler.updateFromZone(zone({ fanSpeed: 'Auto' }));
+
+  assert.strictEqual(await handler.getTargetFanState(), Characteristic.TargetFanState.AUTO);
+  assert.strictEqual(fan.chars.get(Characteristic.TargetFanState)?.value,
+    Characteristic.TargetFanState.AUTO, 'the read and the push agree');
+});
+
 test('switching to AUTO sends auto', async () => {
   const { handler, sendCommandCalls } = makeHarness();
   handler.updateFromZone(zone({ fanSpeed: 'quiet' }));
