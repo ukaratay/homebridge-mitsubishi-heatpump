@@ -146,6 +146,7 @@ test('a vane change is not sent to a unit that is OFF', async () => {
   handler.updateFromZone(zone({ power: 0, operationMode: 'off' }));
 
   await handler.setSwingMode(Characteristic.SwingMode.SWING_ENABLED);
+  await new Promise((r) => setTimeout(r, 5)); // vane writes coalesce onto the next tick too
 
   assert.strictEqual(sendCommandCalls.length, 0);
 });

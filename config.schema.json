@@ -57,19 +57,25 @@
         "title": "Show Dry (dehumidify) switch",
         "type": "boolean",
         "default": false,
-        "description": "Add a separate Dry switch tile per unit. Off by default: HeaterCooler now carries fan speed and vane on the main tile, so the extra switches are only needed if you want one-tap access to dehumidify. Only added on units whose profile reports dry support."
+        "description": "Add a separate Dry switch tile per unit. Off by default: the main tile carries the vane and fan speed has its own Fixed Fan Speed tile, so the extra switches are only needed if you want one-tap access to dehumidify. Only added on units whose profile reports dry support."
       },
       "showFanOnlySwitch": {
         "title": "Show Fan-only switch",
         "type": "boolean",
         "default": false,
-        "description": "Add a separate Fan-only switch tile per unit. Off by default. Note this is fan-ONLY mode (the unit runs its fan with no heating or cooling); adjusting fan speed while heating or cooling is done on the main tile and does not need this switch. Only added on units whose profile reports vent support."
+        "description": "Add a separate Fan-only switch tile per unit. Off by default. Note this is fan-ONLY mode (the unit runs its fan with no heating or cooling); adjusting fan speed while heating or cooling is done with the Fixed Fan Speed tile and does not need this switch. Only added on units whose profile reports vent support."
+      },
+      "fixedFanSpeed": {
+        "title": "Show Fixed Fan Speed tile",
+        "type": "boolean",
+        "default": true,
+        "description": "Add a fan tile beside each unit, named after it (for example \"Living Room Fixed Fan Speed\"). On by default. Off is fan auto; on holds the speed on its slider (20% to 100%, quietest to strongest). It is off while the unit runs in fan auto and while the unit is off, and it never turns the unit on. It is a separate accessory, so a scene changes the fan only if you add this tile to it: on with a speed to hold that speed, off for fan auto. A scene that contains only the unit leaves the fan as it is. New tiles appear in the bridge's room; move each one to its unit's room in the Home app. Turn this option off to remove the tiles: HomeKit then has no fan control."
       },
       "exposeVaneSlat": {
         "title": "Expose vane as a Slat service",
         "type": "boolean",
         "default": false,
-        "description": "Expose vane direction as a HomeKit Slats service, giving discrete tilt positions. OFF by default: Apple Home categorises Slats as a WINDOW COVERING, so these tiles join the blinds/shades grouping in your rooms and a room-level blinds control can reach your louvres. Swing on/off is always available on the main climate tile regardless of this setting. Only enable if you want fixed vane angles and accept them appearing among your window coverings."
+        "description": "Expose vane direction as a HomeKit Slats service, giving discrete tilt positions. OFF by default: Apple Home categorises Slats as a WINDOW COVERING, so these tiles join the blinds/shades grouping in your rooms and a room-level blinds control can reach your louvres. Swing on/off is always available on the main climate tile regardless of this setting, and swing off sets the vane to auto, so this is the only way to set a fixed angle from Home. Only enable if you want fixed vane angles and accept them appearing among your window coverings."
       },
       "excludeDevices": {
         "title": "Hide Device IDs",
@@ -172,6 +178,7 @@
       "expanded": false,
       "items": [
         "showHumiditySensor",
+        "fixedFanSpeed",
         "showDrySwitch",
         "showFanOnlySwitch",
         "exposeVaneSlat"

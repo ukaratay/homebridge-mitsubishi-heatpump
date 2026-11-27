@@ -16,6 +16,8 @@ import { join } from 'node:path';
 
 interface SchemaNode {
   type?: string;
+  default?: unknown;
+  additionalProperties?: unknown;
   required?: unknown;
   properties?: Record<string, SchemaNode>;
   items?: SchemaNode;
@@ -23,7 +25,9 @@ interface SchemaNode {
 
 const schemaPath = join(__dirname, '..', 'config.schema.json');
 const raw = readFileSync(schemaPath, 'utf8');
-const config = JSON.parse(raw) as { pluginAlias: string; pluginType: string; schema: SchemaNode };
+const config = JSON.parse(raw) as {
+  pluginAlias: string; pluginType: string; schema: SchemaNode; layout?: unknown[];
+};
 
 /** Every object node in the schema, at any depth. */
 function walk(node: SchemaNode, path: string, out: Array<[string, SchemaNode]> = []) {
@@ -76,4 +80,42 @@ test('a mirror entry requires both ends', () => {
   const mirror = config.schema.properties?.mirror;
   assert.ok(mirror?.items, 'mirror is an array with items');
   assert.deepStrictEqual(mirror.items.required, ['source', 'target']);
+});
+
+/** Every property key the layout places, at any depth (plain strings and `{ key }` items). */
+function layoutKeys(items: unknown[], out: string[] = []): string[] {
+  for (const item of items) {
+    if (typeof item === 'string') {
+      out.push(item);
+    } else if (item && typeof item === 'object') {
+      const { key, items: nested } = item as { key?: string; items?: unknown[] };
+      if (key) {
+        out.push(key);
+      }
+      if (Array.isArray(nested)) {
+        layoutKeys(nested, out);
+      }
+    }
+  }
+  return out;
+}
+
+test('every top-level key the layout places is a property of the schema', () => {
+  const props = Object.keys(config.schema.properties ?? {});
+  const missing = layoutKeys(config.layout ?? [])
+    .filter((k) => !k.includes('[]') && !k.includes('.'))
+    .filter((k) => !props.includes(k));
+  assert.deepStrictEqual(missing, []);
+});
+
+// The tile is on by default; the dropped switch options are gone from the UI,
+// and a config that still carries them is not rejected for unknown keys.
+test('fixedFanSpeed defaults to true and the dropped switch options are gone', () => {
+  const props = config.schema.properties ?? {};
+  assert.strictEqual(props.fixedFanSpeed?.type, 'boolean');
+  assert.strictEqual(props.fixedFanSpeed?.default, true);
+  assert.ok(!('fixedFanSpeedSwitch' in props));
+  assert.ok(!('showFanAutoSwitch' in props));
+  assert.ok(!('showVaneAutoSwitch' in props));
+  assert.notStrictEqual(config.schema.additionalProperties, false);
 });

@@ -8,9 +8,10 @@
 // were never sent (the cloud refuses a mode-less command to an off unit with
 // `modeRequiredWhenDeviceOff`), so it heated to its old 72.5°F.
 //
-// Fixed in two parts: a fan-tile ON never overrides an off in flight, and writes
-// held while the unit was off are sent right after a write in the same burst
-// turns it on.
+// Fixed in two parts: a fan-tile ON does not reach the unit's power at all (the
+// fan is the separate Fixed Fan Speed accessory now, and only holds a speed),
+// and writes held while the unit was off are sent right after a write in the
+// same burst turns it on.
 
 import test from 'node:test';
 import assert from 'node:assert';
@@ -46,7 +47,6 @@ test('Evening Temps on the OFF Garage: climate OFF + fan ON + HEAT leaves it off
     handler.setActive(Characteristic.Active.INACTIVE),
     handler.setFanActive(Characteristic.Active.ACTIVE),
     handler.setRotationSpeed(0),
-    handler.setTargetFanState(Characteristic.TargetFanState.MANUAL),
     handler.setCoolingThresholdTemperature(22.5),
     handler.setTargetHeaterCoolerState(Characteristic.TargetHeaterCoolerState.HEAT),
   ]);
@@ -74,14 +74,14 @@ test('same scene with the fan ON dispatched before the climate OFF: still off', 
   assert.deepStrictEqual(sendCommandCalls.map((c) => c.commands), [{ operationMode: 'off' }]);
 });
 
-test('control: a fan-tile ON with no off in flight still turns the unit on', async () => {
+test('a fan-tile ON with no off in flight does not turn the unit on either', async () => {
   const { handler, sendCommandCalls } = makeHarness();
   handler.updateFromZone(zone());
 
   await handler.setFanActive(Characteristic.Active.ACTIVE);
+  await settle();
 
-  assert.strictEqual(sendCommandCalls.length, 1, '"turn on the fan" on an off unit still works');
-  assert.notStrictEqual(sendCommandCalls[0].commands.operationMode, 'off');
+  assert.deepStrictEqual(sendCommandCalls, [], '"turn on the fans" must not start a heat pump');
 });
 
 test('a scene turning on an OFF unit, mode first: its setpoints, fan and vane follow the turn-on', async () => {
@@ -93,7 +93,7 @@ test('a scene turning on an OFF unit, mode first: its setpoints, fan and vane fo
     handler.setActive(Characteristic.Active.ACTIVE),
     handler.setHeatingThresholdTemperature(20), // 68°F -> 20.0
     handler.setCoolingThresholdTemperature(22), // 71.6°F -> 72°F -> 22.0
-    handler.setRotationSpeed(0),
+    handler.setRotationSpeed(20),
     handler.setSwingMode(Characteristic.SwingMode.SWING_ENABLED),
   ]);
   await settle();
@@ -113,7 +113,7 @@ test('a scene turning on an OFF unit, settings first: same result', async () => 
   await Promise.all([
     handler.setHeatingThresholdTemperature(20),
     handler.setCoolingThresholdTemperature(22),
-    handler.setRotationSpeed(0),
+    handler.setRotationSpeed(20),
     handler.setSwingMode(Characteristic.SwingMode.SWING_ENABLED),
     handler.setActive(Characteristic.Active.ACTIVE),
     handler.setTargetHeaterCoolerState(Characteristic.TargetHeaterCoolerState.HEAT),
