@@ -36,6 +36,15 @@ Requires **Node.js 20 or newer** and **Homebridge 1.6.0+, including 2.x**.
 npm install -g homebridge-mitsubishi-heatpump
 ```
 
+Pre-releases are published under the tag named in their version (`2.4.0-beta.1` is
+`beta`) and are never the default install. `npm view homebridge-mitsubishi-heatpump
+dist-tags` lists the tags that exist. To try a beta, and to go back:
+
+```bash
+npm install -g homebridge-mitsubishi-heatpump@beta
+npm install -g homebridge-mitsubishi-heatpump@latest
+```
+
 From source:
 
 ```bash
@@ -94,7 +103,9 @@ controls beneath it are new. There is no way to migrate these automatically.
 characteristic, and there is no state for dehumidify or fan-only. So:
 
 - **On/off is independent of mode.** Turning a unit off does not change which mode it
-  returns to.
+  returns to: a plain "on" (the tile, Siri, the fan tile) brings it back in the heat, cool
+  or auto it was last on in, and while it is off the mode control shows that mode. Dry and
+  Fan-only are not remembered this way; they are turned on with their own switches.
 - **Setpoints are the two thresholds.** The Home app shows the heating threshold in Heat,
   the cooling threshold in Cool, and both as a band in Auto. Modes the unit's profile says
   it cannot do are removed from the picker.
@@ -110,8 +121,9 @@ characteristic, and there is no state for dehumidify or fan-only. So:
   collapsed tile shows humidity where you wanted temperature.
 - **Filter indicator** appears when the unit reports its filter needs cleaning.
 
-> **Note:** HomeKit caches an accessory's services. If a newly-supported switch or the
-> Auto range doesn't appear after an update, reboot your Home hub or iOS device.
+> **Note:** iOS caches an accessory's services. If a switch you just enabled, or the Auto
+> range, doesn't appear in the Home app, restart your iPhone or iPad. Restarting the Home
+> hub or force-quitting the Home app has not been enough.
 
 ### Vane and swing
 
@@ -169,6 +181,32 @@ problem.
 
 Outdoor temperature is not available — the cloud API does not expose it, and the outdoor
 unit's sensor is reachable only over a direct CN105 serial connection.
+
+## Troubleshooting
+
+### A unit shows "No Response"
+
+The Mitsubishi cloud has reported that unit's Wi-Fi adapter as disconnected. The plugin
+then shows No Response on all of the unit's tiles instead of its last known state, because
+the cloud keeps serving that state from a frozen record and it may be hours old.
+
+- **Commands are still sent.** A scene or tap that turns the unit off goes out anyway.
+- **The report can be wrong.** While a unit is marked offline the plugin asks the cloud
+  about it again about once a minute, and the tiles come back by themselves when the cloud
+  reports it connected.
+- **If it stays that way,** check the unit in the Comfort app. If it is offline there too,
+  switch the indoor unit off and on at its breaker, and if that does not bring it back,
+  redo the adapter's Wi-Fi setup in the Comfort app.
+
+In the Homebridge log, look for `[REACHABILITY] <unit>: unreachable` and
+`[REACHABILITY] <unit>: back online`, and for `reported offline (reason: ...)`.
+
+### A unit shows "0% Humidity"
+
+That tile outlived the sensor it was reading: the unit's wireless sensor was moved or
+unpaired. It is removed when the plugin next reads the unit's record from the cloud and
+finds no sensor: at the next poll, or at the next Homebridge restart if you use
+`disablePolling`. To hide humidity on every unit, set `showHumiditySensor` to `false`.
 
 ## Documentation
 

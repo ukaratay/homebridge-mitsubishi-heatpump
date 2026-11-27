@@ -429,3 +429,51 @@ test('a humidity-only reading leaves the temperature alone', () => {
   assert.strictEqual(currentTemp(h), 22.5,
     'a partial reading updates only the fields it actually carries');
 });
+
+// ---- the zone record and a paired sensor disagree ----------------------------
+//
+// applyZoneSensors removes the humidity tile when the cloud's zone record says
+// the unit has no sensor, and holds off stream readings that would re-create it.
+// A reading from the unit's own paired sensor is different: it is the most direct
+// evidence there is that a sensor exists. The zone record lags, and with
+// disablePolling it is not read again until a restart, so a sensor moved to a
+// unit that had none would otherwise get no humidity tile.
+
+const NO_SENSOR_RECORD = { hasSensor: false, hasMhk2: false, humidity: null } as never;
+
+test('a reading from a newly paired sensor creates the humidity tile despite the zone record', () => {
+  const h = makeHarness();
+  h.handler.applyZoneSensors(NO_SENSOR_RECORD);
+
+  h.emitStreaming({ roomTemp: 22, power: 1, operationMode: 'cool', humidity: 44 });
+  assert.strictEqual(h.humidity(), null, 'a stream value alone does not, while the record says no sensor');
+
+  h.emitSensor({ humidity: 45 });
+  assert.ok(h.humidity(), 'the sensor itself does');
+  assert.strictEqual(
+    h.humidity()!.chars.get(Characteristic.CurrentRelativeHumidity)?.value, 45);
+});
+
+test('the zone record does not remove the tile while the sensor is still reporting', () => {
+  const h = makeHarness();
+  h.emitSensor({ humidity: 45 });
+  assert.ok(h.humidity());
+  const before = h.publishes();
+
+  h.handler.applyZoneSensors(NO_SENSOR_RECORD);
+
+  assert.ok(h.humidity(), 'a fresh reading outranks a stale record');
+  assert.strictEqual(h.publishes(), before);
+});
+
+test('once the sensor has gone quiet, the zone record removes the tile', () => {
+  const h = makeHarness();
+  h.emitSensor({ humidity: 45 });
+  // Moved to another unit: its readings stop. Age the last one past the window
+  // in which the sensor is taken as authoritative.
+  h.handler['sensorReadingTs'] = Date.now() - 10 * 60 * 1000;
+
+  h.handler.applyZoneSensors(NO_SENSOR_RECORD);
+
+  assert.strictEqual(h.humidity(), null);
+});

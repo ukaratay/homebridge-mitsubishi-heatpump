@@ -2,7 +2,7 @@ import { Service, PlatformAccessory, CharacteristicValue } from 'homebridge';
 import { KumoV3Platform } from './platform';
 import { KumoAPI } from './kumo-api';
 import {
-  DeviceStatus, DeviceProfile, Zone, Commands, MirrorState, SensorReading,
+  Adapter, DeviceStatus, DeviceProfile, Zone, Commands, MirrorState, SensorReading,
   FanSpeed, FAN_SPEEDS, VaneDirection, isVaneDirection, normalizeFanSpeed,
 } from './settings';
 import { cToF, quantizeSetpointInRange, sameSetpoint } from './temperature';
@@ -50,6 +50,12 @@ const VANE_TILT: ReadonlyArray<{ vane: VaneDirection; angle: number }> = [
 ];
 const TILT_STEP = 45;
 
+/** A mode the unit can be ON in, in the form it is sent. */
+type ActiveMode = 'heat' | 'cool' | 'auto' | 'dry' | 'vent';
+
+/** A mode the climate tile's own picker can show, and so can turn the unit on in. */
+type PowerOnMode = 'heat' | 'cool' | 'auto';
+
 export class KumoThermostatAccessory {
   private service: Service;
 
@@ -57,6 +63,13 @@ export class KumoThermostatAccessory {
   private siteId: string;
   private currentStatus: DeviceStatus | null = null;
   private hasHumiditySensor: boolean = false;
+  // The cloud's zone record said this unit has nothing to read humidity from.
+  // While set, no reading creates the humidity tile. See applyZoneSensors.
+  private humiditySourceAbsent = false;
+  // The setpoint range last written to the log. profile_update is a heartbeat
+  // (every few minutes per unit), and logging the unchanged range each time
+  // buried the lines that matter. See applyDeviceProfile.
+  private lastLoggedRange: string | null = null;
   private lastUpdateTimestamp: number = 0;
   private lastUpdateSource: 'streaming' | 'polling' | 'local' | 'none' = 'none';
   private lastLocalUpdateTs: number = 0;
@@ -319,6 +332,13 @@ export class KumoThermostatAccessory {
         .onSet(this.setDryOn.bind(this));
     }
 
+    // And a cached filter indicator: until its read handler is bound it answers
+    // with its cached value, even beside tiles that read No Response.
+    const cachedFilter = this.accessory.getService(this.platform.Service.FilterMaintenance);
+    if (cachedFilter) {
+      this.adoptFilterMaintenance(cachedFilter);
+    }
+
     // Cached Slats and Humidity services need their handlers re-bound now too.
     // Both are normally created from an async event (the device profile / the
     // first humidity reading); without this, a restart leaves the cached service
@@ -406,13 +426,19 @@ export class KumoThermostatAccessory {
     if (typeof humidity === 'number' && !isNaN(humidity)) {
       this.sensorHumidity = humidity;
       this.sensorReadingTs = Date.now();
+      // A reading from the unit's own paired sensor proves there is a sensor,
+      // whatever the zone record last said (it lags, and is not read at all with
+      // disablePolling). See applyZoneSensors.
+      if (this.isHumidityReading(humidity)) {
+        this.humiditySourceAbsent = false;
+      }
       if (this.currentStatus) {
         this.currentStatus.humidity = humidity;
       }
       // Same latch and config gate the poll path uses: opting out of the humidity
       // service must not be undone by the sensor arriving from a different event.
       if (this.platform.kumoConfig.showHumiditySensor !== false) {
-        if (!this.hasHumiditySensor) {
+        if (!this.hasHumiditySensor && this.mayCreateHumidityTile(humidity)) {
           this.hasHumiditySensor = true;
           this.setupHumidityService();
         }
@@ -524,11 +550,18 @@ export class KumoThermostatAccessory {
     this.service.getCharacteristic(this.platform.Characteristic.CoolingThresholdTemperature)
       .setProps({ minValue: coolMin, maxValue: coolMax, minStep: 0.1 });
 
-    this.platform.log.info(
-      `${this.accessory.displayName}: setpoint range heat ${heatMin}-${heatMax}°C ` +
-      `(${cToF(heatMin).toFixed(0)}-${cToF(heatMax).toFixed(0)}°F), ` +
-      `cool ${coolMin}-${coolMax}°C (${cToF(coolMin).toFixed(0)}-${cToF(coolMax).toFixed(0)}°F)`,
-    );
+    // Logged when it changes, not on every heartbeat (the props above are
+    // re-applied each time; that is idempotent). Ported from
+    // homebridge-mitsubishi-comfort ac1b646.
+    const range = `${heatMin}-${heatMax}/${coolMin}-${coolMax}`;
+    if (range !== this.lastLoggedRange) {
+      this.lastLoggedRange = range;
+      this.platform.log.info(
+        `${this.accessory.displayName}: setpoint range heat ${heatMin}-${heatMax}°C ` +
+        `(${cToF(heatMin).toFixed(0)}-${cToF(heatMax).toFixed(0)}°F), ` +
+        `cool ${coolMin}-${coolMax}°C (${cToF(coolMin).toFixed(0)}-${cToF(coolMax).toFixed(0)}°F)`,
+      );
+    }
 
     // Restrict the mode picker to what the unit can actually do. A cooling-only
     // unit offering HEAT in the Home app just produces a command it rejects.
@@ -607,6 +640,13 @@ export class KumoThermostatAccessory {
     } else {
       this.removeDrySwitch();
     }
+
+    // A profile that arrives while the unit is offline may just have created
+    // services. They get the error too, rather than sitting at HAP's defaults
+    // beside tiles that read No Response.
+    if (!this.isReachable()) {
+      this.pushUnreachable();
+    }
   }
 
   /**
@@ -640,11 +680,14 @@ export class KumoThermostatAccessory {
       .onGet(this.getFanOnlyOn.bind(this))
       .onSet(this.setFanOnlyOn.bind(this));
 
-    // Reflect current state immediately if we already have a status
-    this.fanOnlyService.updateCharacteristic(
-      this.platform.Characteristic.On,
-      this.isFanOnlyActive(this.currentStatus),
-    );
+    // Reflect current state immediately if we already have a status (and are
+    // not showing No Response: see pushUnreachable).
+    if (this.isReachable()) {
+      this.fanOnlyService.updateCharacteristic(
+        this.platform.Characteristic.On,
+        this.isFanOnlyActive(this.currentStatus),
+      );
+    }
 
     // The profile arrives via an async streaming event, after the accessory
     // has already been published to the bridge. A service added now is invisible
@@ -748,11 +791,14 @@ export class KumoThermostatAccessory {
       .onGet(this.getDryOn.bind(this))
       .onSet(this.setDryOn.bind(this));
 
-    // Reflect current state immediately if we already have a status
-    this.dryService.updateCharacteristic(
-      this.platform.Characteristic.On,
-      this.isDryActive(this.currentStatus),
-    );
+    // Reflect current state immediately if we already have a status (and are
+    // not showing No Response: see pushUnreachable).
+    if (this.isReachable()) {
+      this.dryService.updateCharacteristic(
+        this.platform.Characteristic.On,
+        this.isDryActive(this.currentStatus),
+      );
+    }
 
     // The profile arrives via an async streaming event, after the accessory
     // has already been published to the bridge. A service added now is invisible
@@ -838,23 +884,48 @@ export class KumoThermostatAccessory {
   }
 
   private updateFilterMaintenance(filterDirty: boolean): void {
-    if (!this.filterMaintenanceService) {
+    let service = this.filterMaintenanceService;
+    if (!service) {
       const existing = this.accessory.getService(this.platform.Service.FilterMaintenance);
-      this.filterMaintenanceService =
-        existing || this.accessory.addService(this.platform.Service.FilterMaintenance);
-      this.linkSecondaryService(this.filterMaintenanceService);
+      service = this.adoptFilterMaintenance(
+        existing || this.accessory.addService(this.platform.Service.FilterMaintenance));
       if (!existing) {
         this.publishStructureChange();
         this.platform.log.debug(`Added FilterMaintenance service for ${this.accessory.displayName}`);
       }
     }
 
-    this.filterMaintenanceService.updateCharacteristic(
+    if (!this.isReachable()) {
+      // Possibly created just now, by a frozen record replayed for an offline
+      // unit: it reads No Response like the rest, not HAP's default.
+      service.updateCharacteristic(
+        this.platform.Characteristic.FilterChangeIndication, this.unreachableError() as never);
+      return;
+    }
+    service.updateCharacteristic(
       this.platform.Characteristic.FilterChangeIndication,
-      filterDirty
-        ? this.platform.Characteristic.FilterChangeIndication.CHANGE_FILTER
-        : this.platform.Characteristic.FilterChangeIndication.FILTER_OK,
+      this.filterIndication(filterDirty),
     );
+  }
+
+  private adoptFilterMaintenance(service: Service): Service {
+    this.filterMaintenanceService = service;
+    // A read handler, so the indicator reports No Response with the rest of the
+    // unit instead of serving its last pushed value.
+    service.getCharacteristic(this.platform.Characteristic.FilterChangeIndication)
+      .onGet(this.getFilterChangeIndication.bind(this));
+    this.linkSecondaryService(service);
+    return service;
+  }
+
+  private filterIndication(filterDirty: boolean): number {
+    const C = this.platform.Characteristic.FilterChangeIndication;
+    return filterDirty ? C.CHANGE_FILTER : C.FILTER_OK;
+  }
+
+  async getFilterChangeIndication(): Promise<CharacteristicValue> {
+    this.assertReachable();
+    return this.filterIndication(this.currentStatus?.filterDirty === true);
   }
 
   // Handle streaming updates
@@ -881,7 +952,11 @@ export class KumoThermostatAccessory {
         humidity: data.humidity ?? null,
         power: data.power!,
         operationMode: data.operationMode!,
-        previousOperationMode: data.operationMode!,
+        // The unit's own memory of the mode it was last on in (docs/protocol.md).
+        // Only device_update carries it; it seeds the power-on mode, see
+        // lastActiveMode.
+        previousOperationMode:
+          (data as { previousOperationMode?: string }).previousOperationMode || data.operationMode!,
         fanSpeed: data.fanSpeed || 'auto',
         airDirection: data.airDirection || 'auto',
         connected: true,
@@ -1044,16 +1119,38 @@ export class KumoThermostatAccessory {
       C.CurrentHeaterCoolerState,
       C.TargetHeaterCoolerState,
       C.CurrentTemperature,
+      C.HeatingThresholdTemperature,
+      C.CoolingThresholdTemperature,
     ]) {
       this.service.updateCharacteristic(characteristic, err);
     }
-    this.fanService?.updateCharacteristic(C.Active, err);
-    this.fanOnlyService?.updateCharacteristic(C.On, err);
-    this.dryService?.updateCharacteristic(C.On, err);
+    // Every service the accessory owns, not only the climate tile: one left out
+    // keeps showing its last value beside a unit that reads No Response.
+    if (this.swingModeRegistered) {
+      this.service.updateCharacteristic(C.SwingMode, err);
+    }
+    if (this.fanService) {
+      this.fanService.updateCharacteristic(C.Active, err);
+      this.fanService.updateCharacteristic(C.CurrentFanState, err);
+      this.fanService.updateCharacteristic(C.RotationSpeed, err);
+      if (this.targetFanStateRegistered) {
+        this.fanService.updateCharacteristic(C.TargetFanState, err);
+      }
+    }
+    for (const sw of [this.fanOnlyService, this.dryService]) {
+      sw?.updateCharacteristic(C.On, err);
+    }
+    if (this.slatsService) {
+      this.slatsService.updateCharacteristic(C.CurrentSlatState, err);
+      this.slatsService.updateCharacteristic(C.CurrentTiltAngle, err);
+      this.slatsService.updateCharacteristic(C.TargetTiltAngle, err);
+    }
     this.humidityService?.updateCharacteristic(C.CurrentRelativeHumidity, err);
+    this.filterMaintenanceService?.updateCharacteristic(C.FilterChangeIndication, err);
   }
 
   public updateFromZone(zone: Zone) {
+    this.applyZoneSensors(zone.adapter);
     const updateTimestamp = Date.now();
     this.processZoneUpdate(zone, 'polling', updateTimestamp);
   }
@@ -1208,17 +1305,18 @@ export class KumoThermostatAccessory {
       // Check if device has a humidity reading and add the sensor service if so.
       // CurrentRelativeHumidity is NOT a valid characteristic on HeaterCooler
       // (it was optional on Thermostat), so humidity needs its own service.
-      const hasHumidity = effectiveHumidity !== null && effectiveHumidity !== undefined;
+      const hasHumidity = this.mayCreateHumidityTile(effectiveHumidity);
       const wantHumidity = this.platform.kumoConfig.showHumiditySensor !== false;
       if (hasHumidity && wantHumidity && !this.hasHumiditySensor) {
         this.hasHumiditySensor = true;
         this.setupHumidityService();
         this.platform.log.debug(`Added humidity sensor for device ${this.deviceSerial}`);
       }
-      // Note: Once humidity is detected, we never remove the characteristic.
-      // Streaming updates may intermittently omit humidity data, but that doesn't
-      // mean the hardware sensor is gone. Toggling the characteristic destabilizes
-      // HomeKit and causes "No Response" errors.
+      // Note: a MISSING reading never removes the service. Streaming updates may
+      // intermittently omit humidity data, but that doesn't mean the hardware
+      // sensor is gone, and toggling the service destabilizes HomeKit and causes
+      // "No Response" errors. Only the cloud's zone record saying outright that
+      // the unit has no source removes it: see applyZoneSensors.
 
       // Convert adapter data to DeviceStatus format
       const status: DeviceStatus = {
@@ -1260,6 +1358,8 @@ export class KumoThermostatAccessory {
       };
 
       this.currentStatus = status;
+      this.rememberActiveMode();
+      this.seedActiveMode(zone.adapter.previousOperationMode);
       // Both setpoints, not one "target": on HeaterCooler each threshold is the
       // setpoint for its own mode and the band is live in AUTO, so there is no
       // single target temperature to name.
@@ -1327,6 +1427,13 @@ export class KumoThermostatAccessory {
         status.spCool,
       );
     }
+
+    // Recovery from No Response comes through here, and the filter indicator was
+    // pushed the error with everything else.
+    this.filterMaintenanceService?.updateCharacteristic(
+      this.platform.Characteristic.FilterChangeIndication,
+      this.filterIndication(status.filterDirty === true),
+    );
 
     // Only update humidity if the device has a humidity sensor
     if (this.hasHumiditySensor && status.humidity !== null) {
@@ -1402,14 +1509,20 @@ export class KumoThermostatAccessory {
    * (that is `Active`) and nothing for dry or fan-only. Dry and vent report COOL
    * so the tile stays coherent while their dedicated switches drive them; dry
    * genuinely belongs there, since its setpoint lives in spCool.
+   *
+   * An off unit shows the mode it will come back on in, not a default.
    */
   private mapToTargetHeaterCoolerState(status: DeviceStatus): number {
     const C = this.platform.Characteristic.TargetHeaterCoolerState;
+    // While the unit is off, the mode a bare ON will turn it on in. See lastActiveMode.
+    const mode = this.toActiveMode(status.operationMode) && status.power === 1
+      ? status.operationMode
+      : this.lastActiveMode();
 
-    if (this.isAutoMode(status.operationMode)) {
+    if (this.isAutoMode(mode)) {
       return C.AUTO;
     }
-    if (status.operationMode === 'heat') {
+    if (mode === 'heat') {
       return C.HEAT;
     }
     // cool, dry, vent, and anything unrecognised.
@@ -1553,9 +1666,8 @@ export class KumoThermostatAccessory {
   /**
    * Turn the unit on or off, independently of its mode.
    *
-   * Turning ON restores the mode the unit was last in rather than picking one:
-   * `previousOperationMode` is what the hardware itself remembers, and HomeKit
-   * sends Active=1 with no mode of its own.
+   * Turning ON restores the mode the unit was last on in rather than picking
+   * one: HomeKit sends Active=1 with no mode of its own. See lastActiveMode.
    */
   async setActive(value: CharacteristicValue): Promise<void> {
     const on = value === this.platform.Characteristic.Active.ACTIVE;
@@ -1578,10 +1690,10 @@ export class KumoThermostatAccessory {
     if (!on) {
       operationMode = 'off';
     } else {
-      const remembered = this.currentStatus?.operationMode;
-      operationMode = remembered && remembered !== 'off'
-        ? this.normalizeSendMode(remembered)
-        : this.defaultOnMode();
+      // The cached mode is only usable while the cache still shows the unit on
+      // (an off in flight). Once it is off the cache says 'off', which is where
+      // the remembered mode comes in.
+      operationMode = this.toActiveMode(this.currentStatus?.operationMode) ?? this.lastActiveMode();
     }
 
     this.platform.log.info(
@@ -1629,15 +1741,84 @@ export class KumoThermostatAccessory {
     }
   }
 
-  /** Collapse a reported mode (autoHeat/autoCool) to one the API accepts on send. */
-  private normalizeSendMode(mode: string): 'heat' | 'cool' | 'auto' | 'dry' | 'vent' {
+  /** `mode` as a mode the unit can be on in, or null for 'off', missing or unknown. */
+  private toActiveMode(mode: string | null | undefined): ActiveMode | null {
+    if (!mode) {
+      return null;
+    }
     if (this.isAutoMode(mode)) {
       return 'auto';
     }
-    if (mode === 'heat' || mode === 'cool' || mode === 'dry' || mode === 'vent') {
-      return mode;
+    return mode === 'heat' || mode === 'cool' || mode === 'dry' || mode === 'vent' ? mode : null;
+  }
+
+  /** `mode` as one the climate tile's picker can show, or null. */
+  private toPowerOnMode(mode: string | null | undefined): PowerOnMode | null {
+    const active = this.toActiveMode(mode);
+    return active === 'heat' || active === 'cool' || active === 'auto' ? active : null;
+  }
+
+  /**
+   * The mode a plain "on" turns the unit on in: the heat, cool or auto it was
+   * last on in.
+   *
+   * An off unit reports `operationMode: 'off'`, so the cached status cannot say
+   * what to come back as, and until this existed every tile tap, "turn on" to
+   * Siri and fan-tile ON brought an off unit up in AUTO, whatever it had been
+   * doing. That also broke the mode picker: Home shows Off / Heat / Cool / Auto,
+   * and choosing the mode the tile already displays sends Active=1 alone, so
+   * picking "Cool" on an off unit whose target read COOL turned it on in AUTO.
+   * mapToTargetHeaterCoolerState therefore shows this same mode while the unit is
+   * off: what the picker displays is what a bare ON delivers.
+   *
+   * That rule is why Dry and Fan-only are NOT remembered here. The picker cannot
+   * show them (both read as COOL while they run), so a unit last on in Dry would
+   * show Cool and come back dehumidifying. They are excursions made with their
+   * own switches; the tile returns to the heat, cool or auto from before them.
+   *
+   * The profile is applied when the value is READ, not only when it is stored: a
+   * unit that cannot heat never comes back in heat or auto, whatever a mirror
+   * push, the unit's own memory, or a value cached before the profile arrived
+   * put here. The adapter answers HTTP 200 to a mode it cannot do and ignores it,
+   * so that unit could otherwise no longer be turned on with a bare ON at all.
+   *
+   * Kept in accessory.context, which Homebridge writes with the accessory cache,
+   * so it survives a restart without a write of our own. When there is nothing
+   * remembered yet it is seeded from `previousOperationMode`, the unit's own
+   * memory of its last mode, which only device_update carries. Found by reading
+   * homebridge-mitsubishi-comfort 36dae3e ("the fork turned every off unit on in
+   * AUTO"), which keeps a similar memory.
+   */
+  private lastActiveMode(): PowerOnMode {
+    const remembered = this.toPowerOnMode(this.accessory.context.lastActiveMode);
+    const cannotHeat = this.deviceProfile !== null && !this.deviceProfile.hasModeHeat;
+    if (!remembered || (cannotHeat && remembered !== 'cool')) {
+      return this.defaultOnMode();
     }
-    return 'cool';
+    return remembered;
+  }
+
+  /** Record the mode of a unit that is on. Called wherever the cached status changes. */
+  private rememberActiveMode(): void {
+    const status = this.currentStatus;
+    if (!status || status.power !== 1) {
+      return;
+    }
+    const mode = this.toPowerOnMode(status.operationMode);
+    if (mode) {
+      this.accessory.context.lastActiveMode = mode;
+    }
+  }
+
+  /** Take the unit's own remembered mode when we have none of our own. */
+  private seedActiveMode(previousOperationMode: string | null | undefined): void {
+    if (this.accessory.context.lastActiveMode) {
+      return;
+    }
+    const mode = this.toPowerOnMode(previousOperationMode);
+    if (mode) {
+      this.accessory.context.lastActiveMode = mode;
+    }
   }
 
   /** Mode to use when HomeKit says "on" and we have nothing remembered. */
@@ -1725,6 +1906,10 @@ export class KumoThermostatAccessory {
    * heat/cool/auto or when the unit is off.
    */
   private refreshClimateCharacteristics(): void {
+    // Every power or mode change we make ourselves ends here, so this is where a
+    // command's mode is remembered; updates from the unit go through
+    // processZoneUpdate. Before the reachability check: the cache changed either way.
+    this.rememberActiveMode();
     // Unreachable: the cache is updated, but HomeKit stays in No Response.
     if (!this.currentStatus || !this.isReachable()) {
       return;
@@ -1947,6 +2132,10 @@ export class KumoThermostatAccessory {
 
   async getCurrentFanState(): Promise<CharacteristicValue> {
     this.assertReachable();
+    return this.currentFanState();
+  }
+
+  private currentFanState(): number {
     const C = this.platform.Characteristic.CurrentFanState;
     if (!this.currentStatus ||
         this.mapToActive(this.currentStatus) === this.platform.Characteristic.Active.INACTIVE) {
@@ -1999,6 +2188,9 @@ export class KumoThermostatAccessory {
       const speed: FanSpeed = intent.auto === true
         ? 'auto'
         : (intent.speed ?? this.lastManualFan);
+      // What the request resolved to, at info: the handlers above only log what
+      // each characteristic was sent, and a scene sends several that disagree.
+      this.platform.log.info(`[FAN] ${this.accessory.displayName}: -> "${speed}"`);
       void this.writeFanSpeed(speed);
     }, 0);
   }
@@ -2067,6 +2259,13 @@ export class KumoThermostatAccessory {
     if (known && known !== 'auto') {
       this.lastManualFan = known;
     }
+    // The bookkeeping above always runs; nothing below is pushed over No
+    // Response. A setter still sends while the unit is offline (assertReachable),
+    // and without this its success repainted the fan tile from the stale cache.
+    // Ported from homebridge-mitsubishi-comfort 8b65144.
+    if (!this.isReachable()) {
+      return;
+    }
     if (this.targetFanStateRegistered) {
       this.fanService.updateCharacteristic(
         C.TargetFanState,
@@ -2074,6 +2273,9 @@ export class KumoThermostatAccessory {
       );
     }
     this.fanService.updateCharacteristic(C.RotationSpeed, this.fanSpeedToRotation(speed));
+    // Pushed, not only served on read: recovery from No Response has to put a
+    // value back on every characteristic pushUnreachable put the error on.
+    this.fanService.updateCharacteristic(C.CurrentFanState, this.currentFanState());
     if (this.currentStatus) {
       this.fanService.updateCharacteristic(C.Active, this.mapToActive(this.currentStatus));
     }
@@ -2130,6 +2332,10 @@ export class KumoThermostatAccessory {
     if (!swinging && isVaneDirection(vane) && vane !== 'auto') {
       this.lastFixedVane = vane;
     }
+    // As in syncFanCharacteristics: remember, but push nothing over No Response.
+    if (!this.isReachable()) {
+      return;
+    }
 
     if (this.swingModeRegistered) {
       this.service.updateCharacteristic(
@@ -2143,12 +2349,20 @@ export class KumoThermostatAccessory {
         C.CurrentSlatState,
         swinging ? C.CurrentSlatState.SWINGING : C.CurrentSlatState.FIXED,
       );
-      const tilt = this.vaneToTilt(vane);
-      if (tilt !== null) {
-        this.slatsService.updateCharacteristic(C.CurrentTiltAngle, tilt);
-        this.slatsService.updateCharacteristic(C.TargetTiltAngle, tilt);
-      }
+      const tilt = this.shownTilt(vane);
+      this.slatsService.updateCharacteristic(C.CurrentTiltAngle, tilt);
+      this.slatsService.updateCharacteristic(C.TargetTiltAngle, tilt);
     }
+  }
+
+  /**
+   * The tilt angle to show for a vane value. 'auto' and 'swing' are not angles,
+   * so they show the last fixed one the unit was seen at (flat until there is
+   * one). The push and the read agree on this; they used not to, the push leaving
+   * the last angle in place while a read answered 0.
+   */
+  private shownTilt(vane: string): number {
+    return this.vaneToTilt(vane) ?? this.vaneToTilt(this.lastFixedVane) ?? 0;
   }
 
   /** Send a vane value, validate it, and reconcile the characteristics. */
@@ -2213,7 +2427,7 @@ export class KumoThermostatAccessory {
 
   async getTargetTiltAngle(): Promise<CharacteristicValue> {
     this.assertReachable();
-    return this.vaneToTilt(this.currentStatus?.airDirection ?? '') ?? 0;
+    return this.shownTilt(this.currentStatus?.airDirection ?? '');
   }
 
   async setTargetTiltAngle(value: CharacteristicValue): Promise<void> {
@@ -2273,6 +2487,67 @@ export class KumoThermostatAccessory {
    * units report it, and the value is cloud-sourced (the local status has no
    * humidity field).
    */
+  /** A humidity value that is a real reading. 0 is what the cloud sends for "none". */
+  private isHumidityReading(humidity: unknown): humidity is number {
+    return typeof humidity === 'number' && !isNaN(humidity) && humidity > 0;
+  }
+
+  private mayCreateHumidityTile(humidity: unknown): boolean {
+    return this.isHumidityReading(humidity) && !this.humiditySourceAbsent;
+  }
+
+  /**
+   * Drop the humidity tile when the cloud's zone record says the unit has nothing
+   * to read humidity from.
+   *
+   * The tile is created on the first reading and cached with the accessory, and
+   * the getter serves 0 when there is no reading, so a unit that once had one (a
+   * wireless sensor since moved to another unit or unpaired, or a stray value)
+   * kept a tile reading "0%" for good. The only way out was showHumiditySensor
+   * false, which removes it from every unit. Seen on the owner's Family Room AC
+   * 2026-11-25; upstream saw the same after moving a sensor between rooms
+   * (homebridge-mitsubishi-comfort fc73d52, 2026-09-28), which this follows.
+   *
+   * Only an explicit statement removes it: `hasSensor === false`, no MHK2, and no
+   * reading in the record. A reading that is merely missing never does (see the
+   * note in processZoneUpdate). And only the real zones record may be passed in:
+   * the streaming and local paths fill hasSensor from the humidity field, so they
+   * say nothing about the hardware.
+   *
+   * While the record says there is no source, a humidity in device_update does
+   * not re-create the tile. Without that, a stream that still carried one for
+   * the unit would add the service again and the next poll would remove it, and
+   * every such flip is a structural change HomeKit has to re-read.
+   *
+   * A reading from the unit's own paired sensor (sensor_update) is different: it
+   * is direct evidence of a sensor, so it lifts that hold, and while one is fresh
+   * the record cannot remove the tile. A sensor newly paired to this unit gets
+   * its tile at once, and one moved away loses it once its readings go stale.
+   */
+  public applyZoneSensors(adapter: Adapter): void {
+    const sensorSpeaking = this.sensorReadingFresh() && this.isHumidityReading(this.sensorHumidity);
+    const absent = adapter.hasSensor === false && adapter.hasMhk2 !== true &&
+      !this.isHumidityReading(adapter.humidity) && !sensorSpeaking;
+    if (!absent) {
+      this.humiditySourceAbsent = false;
+      return;
+    }
+    this.humiditySourceAbsent = true;
+
+    const existing = this.accessory.getService(this.platform.Service.HumiditySensor);
+    if (!existing) {
+      return;
+    }
+    this.accessory.removeService(existing);
+    this.humidityService = null;
+    this.hasHumiditySensor = false;
+    this.publishStructureChange();
+    this.platform.log.info(
+      `${this.accessory.displayName}: removed the humidity tile — the cloud reports no ` +
+      'sensor or MHK2 for this unit. It comes back by itself if one is paired.',
+    );
+  }
+
   private setupHumidityService(): void {
     if (this.humidityService) {
       return;
@@ -2574,6 +2849,12 @@ export class KumoThermostatAccessory {
       this.platform.log.warn(`[MIRROR] ${this.accessory.displayName}: target has no vent mode — skipping`);
       return;
     }
+    // The adapter answers 200 to a mode the unit cannot do and ignores it, so the
+    // echo below would show a cooling-only target heating.
+    if ((mode === 'heat' || mode === 'auto') && this.deviceProfile && !this.deviceProfile.hasModeHeat) {
+      this.platform.log.warn(`[MIRROR] ${this.accessory.displayName}: target cannot heat — skipping ${mode}`);
+      return;
+    }
 
     const commands: Commands = { operationMode: mode };
     const fan = desired.fanSpeed;
@@ -2630,12 +2911,12 @@ export class KumoThermostatAccessory {
 
       this.refreshClimateCharacteristics();
       // Echo the setpoints through the thresholds — the mirrored value lands on
-      // whichever edge(s) the source actually changed.
-      if (commands.spHeat !== undefined) {
+      // whichever edge(s) the source actually changed. Not over No Response.
+      if (commands.spHeat !== undefined && this.isReachable()) {
         this.service.updateCharacteristic(
           this.platform.Characteristic.HeatingThresholdTemperature, commands.spHeat);
       }
-      if (commands.spCool !== undefined) {
+      if (commands.spCool !== undefined && this.isReachable()) {
         this.service.updateCharacteristic(
           this.platform.Characteristic.CoolingThresholdTemperature, commands.spCool);
       }

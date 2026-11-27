@@ -323,6 +323,10 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
             // Create accessory handler
             const handler = new KumoThermostatAccessory(this, existingAccessory, this.kumoAPI, this.kumoConfig.pollInterval);
             this.accessoryHandlers.push(handler);
+            // A humidity tile cached from an earlier run, for a unit the cloud now
+            // says has no sensor, goes away here rather than at the first poll
+            // (which never comes with disablePolling). See applyZoneSensors.
+            handler.applyZoneSensors(zone.adapter);
 
             // Update accessory if needed
             this.api.updatePlatformAccessories([existingAccessory]);
@@ -341,6 +345,7 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
             // Create accessory handler
             const handler = new KumoThermostatAccessory(this, accessory, this.kumoAPI, this.kumoConfig.pollInterval);
             this.accessoryHandlers.push(handler);
+            handler.applyZoneSensors(zone.adapter);
 
             // Register accessory
             this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
