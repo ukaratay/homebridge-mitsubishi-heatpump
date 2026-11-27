@@ -108,12 +108,13 @@ test('every top-level key the layout places is a property of the schema', () => 
   assert.deepStrictEqual(missing, []);
 });
 
-// The switch is on by default; the dropped switch options are gone from the UI,
+// The tile is on by default; the dropped switch options are gone from the UI,
 // and a config that still carries them is not rejected for unknown keys.
-test('fixedFanSpeedSwitch defaults to true and the dropped switch options are gone', () => {
+test('fixedFanSpeed defaults to true and the dropped switch options are gone', () => {
   const props = config.schema.properties ?? {};
-  assert.strictEqual(props.fixedFanSpeedSwitch?.type, 'boolean');
-  assert.strictEqual(props.fixedFanSpeedSwitch?.default, true);
+  assert.strictEqual(props.fixedFanSpeed?.type, 'boolean');
+  assert.strictEqual(props.fixedFanSpeed?.default, true);
+  assert.ok(!('fixedFanSpeedSwitch' in props));
   assert.ok(!('showFanAutoSwitch' in props));
   assert.ok(!('showVaneAutoSwitch' in props));
   assert.notStrictEqual(config.schema.additionalProperties, false);

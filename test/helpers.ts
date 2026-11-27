@@ -241,6 +241,12 @@ export interface HarnessOptions {
   kumoConfig?: Partial<KumoConfig>;
   /** Defaults to a fresh makeAccessory(); pass one to model a cached accessory. */
   accessory?: FakeAccessory;
+  /**
+   * The unit's Fixed Fan Speed accessory. Defaults to a fresh one, or to none
+   * with `fixedFanSpeed: false`, as the platform decides it; pass one to model a
+   * cached accessory, or null for none.
+   */
+  fanAccessory?: FakeAccessory | null;
   /** The platform's LAN client. Defaults to null: cloud-only. */
   localClient?: unknown;
   /** Log methods to use instead of the silent ones, for lines the constructor writes. */
@@ -260,6 +266,11 @@ export function makeAccessoryHarness(opts: HarnessOptions = {}) {
   const accessory = opts.accessory ?? makeAccessory();
   const serial = accessory.context.device.deviceSerial;
   const kumoConfig: Partial<KumoConfig> = { ...opts.kumoConfig };
+  const fanAccessory = opts.fanAccessory !== undefined
+    ? opts.fanAccessory
+    : kumoConfig.fixedFanSpeed === false
+      ? null
+      : makeAccessory(`${accessory.displayName} Fixed Fan Speed`, `${serial}-fan`);
   const sendCommandCalls: Array<{ serial: string; commands: Commands }> = [];
   const sent: Commands[] = [];
   const published: FakeAccessory[][] = [];
@@ -296,12 +307,14 @@ export function makeAccessoryHarness(opts: HarnessOptions = {}) {
     platform as never,
     accessory as never,
     kumoAPI as never,
+    (fanAccessory ?? undefined) as never,
   );
 
   return {
-    handler, accessory, kumoConfig, sendCommandCalls, sent, published,
+    handler, accessory, fanAccessory, kumoConfig, sendCommandCalls, sent, published,
     heaterCooler: accessory.getService(Service.HeaterCooler)!,
-    fan: accessory.getServiceById(Service.Fanv2, 'airflow')!,
+    /** The Fanv2 on the Fixed Fan Speed accessory. Null-asserted: absent with `fixedFanSpeed: false`. */
+    fan: fanAccessory?.getService(Service.Fanv2) as FakeService,
     applyProfile: (p: Partial<DeviceProfile>) => {
       assert.ok(onProfile, 'the accessory subscribed to profile updates');
       onProfile(serial, p);

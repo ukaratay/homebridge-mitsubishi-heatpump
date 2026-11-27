@@ -30,7 +30,7 @@ export interface KumoConfig {
   // Seconds between local status polls (default 15).
   localPollInterval?: number;
   // --- Display options -----------------------------------------------------
-  // Fan speed lives on the linked Fanv2 and swing on the HeaterCooler, so the
+  // Fan speed has its own Fixed Fan Speed tile and swing is on the HeaterCooler, so the
   // Dry and Fan-only Switch tiles are opt-in rather than automatic. Every tile
   // only appears on units whose profile reports the capability.
   /** Add a per-unit "Dry" switch (dehumidify). Default false. */
@@ -38,14 +38,13 @@ export interface KumoConfig {
   /** Add a per-unit "Fan" switch (fan-only mode, no heating/cooling). Default false. */
   showFanOnlySwitch?: boolean;
   /**
-   * Add a per-unit "<unit> Fixed Fan Speed" switch on units with an auto fan.
-   * Default TRUE; only a literal false turns it off. On while the unit runs at
-   * a fixed speed; Off sends fan auto. It also decides a Home scene's fan: a
-   * scene sets fan auto unless it turns this switch on. With false there is no
-   * switch, and a scene replays the fan mode and speed it captured, as 2.3.1
-   * did. See resolveFanBurst in accessory.ts.
+   * Publish a "<unit> Fixed Fan Speed" fan accessory beside each unit. Default
+   * TRUE; only a literal false turns it off. On holds the slider's speed, Off
+   * is fan auto. It is a separate accessory so that a scene sets the fan only
+   * when it includes this tile. With false HomeKit has no fan control. See
+   * setupFanAccessory in accessory.ts.
    */
-  fixedFanSpeedSwitch?: boolean;
+  fixedFanSpeed?: boolean;
   /**
    * Expose indoor humidity as a HumiditySensor service. Default TRUE.
    *

@@ -77,7 +77,7 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
   };
   private readonly kumoAPI: KumoAPI;
   // Read by KumoThermostatAccessory for the per-accessory display options
-  // (the show*Switch options, fixedFanSpeedSwitch, exposeVaneSlat).
+  // (the show*Switch options, exposeVaneSlat).
   public readonly kumoConfig: KumoConfig;
   private readonly sitePollers: Map<string, NodeJS.Timeout> = new Map();
   private readonly degradedPollInterval: number;
@@ -247,6 +247,25 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
     this.discoveryRetryDelayMs = Math.min(this.discoveryRetryDelayMs * 2, this.discoveryRetryMaxMs);
   }
 
+  /**
+   * The cached Fixed Fan Speed accessory with this UUID, or a new, not yet
+   * registered one. The unit's handler adds its service; registerNew then
+   * registers a new one, as for the unit's own accessory.
+   */
+  private fanAccessoryFor(fanUuid: string, unitName: string): PlatformAccessory {
+    return this.accessories.find(accessory => accessory.UUID === fanUuid) ??
+      new this.api.platformAccessory(
+        `${unitName} Fixed Fan Speed`, fanUuid, this.api.hap.Categories.FAN);
+  }
+
+  private registerNew(accessory: PlatformAccessory | undefined): void {
+    if (accessory && !this.accessories.includes(accessory)) {
+      this.log.info('Adding new accessory:', accessory.displayName);
+      this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
+      this.accessories.push(accessory);
+    }
+  }
+
   private async attemptDiscovery(): Promise<boolean> {
     try {
       this.log.info('Starting device discovery');
@@ -267,7 +286,9 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
 
       this.log.info(`Found ${sites.length} site(s)`);
 
-      const discoveredDevices: Array<{ uuid: string; displayName: string; deviceSerial: string }> = [];
+      const discoveredDevices: Array<{
+        uuid: string; fanUuid?: string; displayName: string; deviceSerial: string;
+      }> = [];
 
       // For each site, get zones
       for (const site of sites) {
@@ -291,9 +312,16 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
 
           // Generate unique ID for this device
           const uuid = this.api.hap.uuid.generate(deviceSerial);
+          // The unit's Fixed Fan Speed accessory (see setupFanAccessory in
+          // accessory.ts). Opted out, its UUID is not kept, so a cached one is
+          // removed with the stale accessories below.
+          const fanUuid = this.kumoConfig.fixedFanSpeed === false
+            ? undefined
+            : this.api.hap.uuid.generate(`${deviceSerial}:fan`);
 
           discoveredDevices.push({
             uuid,
+            fanUuid,
             displayName,
             deviceSerial,
           });
@@ -306,6 +334,8 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
             this.log.debug(`Handler already initialized for ${deviceSerial}, skipping`);
             continue;
           }
+
+          const fanAccessory = fanUuid ? this.fanAccessoryFor(fanUuid, displayName) : undefined;
 
           // Check if accessory already exists
           const existingAccessory = this.accessories.find(accessory => accessory.UUID === uuid);
@@ -320,7 +350,7 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
             };
 
             // Create accessory handler
-            const handler = new KumoThermostatAccessory(this, existingAccessory, this.kumoAPI);
+            const handler = new KumoThermostatAccessory(this, existingAccessory, this.kumoAPI, fanAccessory);
             this.accessoryHandlers.push(handler);
             // A humidity tile cached from an earlier run, for a unit the cloud now
             // says has no sensor, goes away here rather than at the first poll
@@ -329,6 +359,7 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
 
             // Update accessory if needed
             this.api.updatePlatformAccessories([existingAccessory]);
+            this.registerNew(fanAccessory);
           } else {
             // Create new accessory
             this.log.info('Adding new accessory:', displayName);
@@ -342,13 +373,14 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
             };
 
             // Create accessory handler
-            const handler = new KumoThermostatAccessory(this, accessory, this.kumoAPI);
+            const handler = new KumoThermostatAccessory(this, accessory, this.kumoAPI, fanAccessory);
             this.accessoryHandlers.push(handler);
             handler.applyZoneSensors(zone.adapter);
 
             // Register accessory
             this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
             this.accessories.push(accessory);
+            this.registerNew(fanAccessory);
           }
         }
       }
@@ -363,7 +395,8 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
 
       // Remove accessories that were not discovered
       const staleAccessories = this.accessories.filter(
-        accessory => !discoveredDevices.find(device => device.uuid === accessory.UUID),
+        accessory => !discoveredDevices.find(
+          device => device.uuid === accessory.UUID || device.fanUuid === accessory.UUID),
       );
 
       if (staleAccessories.length > 0) {

@@ -58,11 +58,11 @@ const ALL_SERVICES: Partial<KumoConfig> = {
 };
 
 /**
- * Every characteristic the accessory shows a value on, across all its services.
+ * Every characteristic the unit shows a value on, across all its services and
+ * its Fixed Fan Speed accessory.
  * `chars` is the fake's record of what the plugin actually reached for.
  */
 function shownValues(h: ReturnType<typeof makeHarness>): Array<[string, unknown]> {
-  const fan = h.accessory.getServiceById(Service.Fanv2, 'airflow')!;
   const pick = (label: string, svc: FakeService | null, ids: unknown[]): Array<[string, unknown]> =>
     svc ? ids.map((id) => [`${label}.${(id as { _name: string })._name}`, svc.chars.get(id)?.value]) : [];
   const C = Characteristic;
@@ -71,8 +71,8 @@ function shownValues(h: ReturnType<typeof makeHarness>): Array<[string, unknown]
       C.Active, C.CurrentHeaterCoolerState, C.TargetHeaterCoolerState, C.CurrentTemperature,
       C.HeatingThresholdTemperature, C.CoolingThresholdTemperature, C.SwingMode,
     ]),
-    ...pick('fan', fan, [C.Active, C.CurrentFanState, C.RotationSpeed, C.TargetFanState]),
-    ...['fan-only', 'dry', 'fan-fixed'].flatMap((subtype) =>
+    ...pick('fan', h.fan, [C.Active, C.RotationSpeed]),
+    ...['fan-only', 'dry'].flatMap((subtype) =>
       pick(subtype, h.accessory.getServiceById(Service.Switch, subtype), [C.On])),
     ...pick('slats', h.accessory.getService(Service.Slats),
       [C.CurrentSlatState, C.CurrentTiltAngle, C.TargetTiltAngle]),
@@ -106,7 +106,7 @@ test('an adapter the cloud reports offline goes No Response instead of serving s
   assert.strictEqual(handler.isReachable(), false);
   await assert.rejects(() => handler.getCurrentTemperature(), 'getter throws while unreachable');
   await assert.rejects(() => handler.getActive(), 'Active getter throws too');
-  await assert.rejects(() => handler.getRotationSpeed(), 'so does the linked fan');
+  await assert.rejects(() => handler.getRotationSpeed(), 'so does the fan accessory');
 
   // The error is pushed immediately rather than waiting for HomeKit to read.
   const pushed = value(Characteristic.CurrentHeaterCoolerState) as HapStatusError;
@@ -208,7 +208,7 @@ test('going offline puts No Response on every service the unit has', async () =>
   h.applyProfile();
   h.stream({ displayConfig: { filter: true } });     // creates the filter indicator too
   const before = shownValues(h);
-  assert.strictEqual(before.length, 18, 'every optional service is present');
+  assert.strictEqual(before.length, 15, 'every optional service is present');
   assert.deepStrictEqual(before.filter(([, v]) => v === undefined || v instanceof Error), [],
     'and every one of them is showing a real value');
 
@@ -289,9 +289,9 @@ test('what was set while offline is still remembered afterwards', async () => {
   await tick();
   await h.handler.setSwingMode(Characteristic.SwingMode.SWING_DISABLED);
   await tick();
-  await h.handler.setTargetFanState(Characteristic.TargetFanState.AUTO);
+  await h.handler.setFanActive(Characteristic.Active.INACTIVE);    // fan auto
   await tick();
-  await h.handler.setTargetFanState(Characteristic.TargetFanState.MANUAL);
+  await h.handler.setFanActive(Characteristic.Active.ACTIVE);
   await tick();
 
   assert.deepStrictEqual(h.sent, [
@@ -310,9 +310,9 @@ test('a write made while offline is remembered by the next one made while offlin
 
   await h.handler.setRotationSpeed(100);           // superPowerful
   await tick();
-  await h.handler.setTargetFanState(Characteristic.TargetFanState.AUTO);
+  await h.handler.setFanActive(Characteristic.Active.INACTIVE);    // fan auto
   await tick();
-  await h.handler.setTargetFanState(Characteristic.TargetFanState.MANUAL);   // back to superPowerful
+  await h.handler.setFanActive(Characteristic.Active.ACTIVE);      // back to superPowerful
   await tick();
 
   assert.deepStrictEqual(h.sent, [{ fanSpeed: 'superPowerful' }, { fanSpeed: 'auto' }, { fanSpeed: 'superPowerful' }]);
