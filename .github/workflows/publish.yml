@@ -32,6 +32,20 @@ jobs:
       - name: Build
         run: npm run build
 
+      # A release whose tag is not v<package.json version> is a forgotten version bump.
+      # It has to fail here, BEFORE the idempotency step below: that step would see the
+      # old version already on npm, skip, and leave the run green with nothing published.
+      # workflow_dispatch carries no tag and is not checked.
+      - name: Check the release tag matches package.json
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if [ -n "$RELEASE_TAG" ] && [ "$RELEASE_TAG" != "v$VERSION" ]; then
+            echo "::error::Release tag $RELEASE_TAG does not match package.json version $VERSION (expected v$VERSION)."
+            exit 1
+          fi
+
       # Makes the job idempotent. npm rejects a duplicate version with a hard error, so
       # without this any release event for a version already on the registry goes red —
       # including backfilling a GitHub release for an older tag, which the "a release for
@@ -50,6 +64,33 @@ jobs:
 
       # Auth is handled automatically via OIDC because a trusted publisher is
       # configured for this package on npmjs.com (no NPM_TOKEN secret needed).
+      #
+      # A prerelease (any version with a hyphen, e.g. 2.4.0-beta.1) is published under
+      # its own dist-tag, the word after the hyphen ("beta"), and never under "latest":
+      # `npm install homebridge-mitsubishi-heatpump` keeps resolving to the last full
+      # release, and a beta is installed on purpose with `...@beta`. npm 11 also refuses
+      # to publish a prerelease without an explicit --tag, so without this a beta release
+      # would simply fail. Ported from homebridge-mitsubishi-comfort 2c3d67d.
       - name: Publish to npm
         if: steps.check.outputs.published == 'false'
-        run: npm publish --provenance --access public
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          case "$VERSION" in
+            *-*)
+              PRE="${VERSION#*-}"
+              DIST_TAG="${PRE%%.*}"
+              # Lower-case letters only, and never "latest": a prerelease must not be
+              # able to take over the tag that plain installs resolve.
+              case "$DIST_TAG" in
+                ''|latest|*[!a-z]*)
+                  echo "::error::Cannot derive a dist-tag from version $VERSION (got '$DIST_TAG'). Use the form 1.2.3-beta.1."
+                  exit 1
+                  ;;
+              esac
+              ;;
+            *)
+              DIST_TAG=latest
+              ;;
+          esac
+          echo "Publishing $VERSION under the '$DIST_TAG' dist-tag."
+          npm publish --provenance --access public --tag "$DIST_TAG"

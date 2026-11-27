@@ -7,6 +7,10 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # The job only checks out the code and runs the suite, so its token gets
+    # read access to the contents and nothing else.
+    permissions:
+      contents: read
     strategy:
       # Every version reports, so one broken runtime does not hide the others.
       fail-fast: false
