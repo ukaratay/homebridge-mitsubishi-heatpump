@@ -10,73 +10,46 @@
 
 import test from 'node:test';
 import assert from 'node:assert';
+import { HapStatusError, HAPStatus } from '@homebridge/hap-nodejs';
 
-import { KumoThermostatAccessory } from '../dist/accessory.js';
-import type { Commands, DeviceProfile, KumoConfig, Zone } from '../dist/settings.js';
-import { Characteristic, Service, makeLog, makeAccessory, type FakeService } from './helpers';
+import type { KumoConfig, Zone } from '../dist/settings.js';
+import {
+  Characteristic, Service, makeAccessory, type FakeService, makeAccessoryHarness,
+} from './helpers';
 
 const SERIAL = 'TESTSERIAL001';
 
-// Mirrors homebridge's hap namespace closely enough to exercise the real path.
-class HapStatusError extends Error {
-  constructor(public hapStatus: number) {
-    super(`HAP status ${hapStatus}`);
-  }
-}
-const hap = { HapStatusError, HAPStatus: { SERVICE_COMMUNICATION_FAILURE: -70402 } };
+// The real hap values, which the shared harness also puts on platform.api.
+const hap = { HAPStatus: { SERVICE_COMMUNICATION_FAILURE: HAPStatus.SERVICE_COMMUNICATION_FAILURE } };
 
 function makeHarness({
-  localSerials = [] as string[], withHap = true, kumoConfig = {} as Partial<KumoConfig>,
+  localSerials = [] as string[], kumoConfig = {} as Partial<KumoConfig>,
   accessory = makeAccessory('Rear bedroom'),
 } = {}) {
-  const sent: Commands[] = [];
-  let profileCb: ((serial: string, profile: Partial<DeviceProfile>) => void) | null = null;
-  let streamCb: ((serial: string, data: Record<string, unknown>) => void) | null = null;
-  const platform = {
-    Service,
-    Characteristic,
-    log: makeLog(),
-    api: withHap ? { updatePlatformAccessories() {}, hap } : { updatePlatformAccessories() {} },
-    kumoConfig,
+  const h = makeAccessoryHarness({
+    kumoConfig, accessory,
     localClient: {
       hasLocal: (serial: string) => localSerials.includes(serial),
       sendCommand: async () => true,
     },
-  };
-  let sensorCb: ((reading: Record<string, unknown>) => void) | null = null;
-  const kumoAPI = {
-    subscribeToDevice(_serial: string, cb: (serial: string, data: Record<string, unknown>) => void) {
-      streamCb = cb;
-    },
-    onDeviceProfileUpdate(cb: (serial: string, profile: Partial<DeviceProfile>) => void) {
-      profileCb = cb;
-    },
-    onSensorUpdate(cb: (reading: Record<string, unknown>) => void) {
-      sensorCb = cb;
-    },
-    sendCommand: async (_serial: string, commands: Commands) => {
-      sent.push(commands);
-      return true;
-    },
-    getDeviceStatus: async () => null,
-  };
-  const handler = new KumoThermostatAccessory(platform as never, accessory as never, kumoAPI as never);
-  const heaterCooler = accessory.getService(Service.HeaterCooler)!;
-  const value = (id: unknown) => heaterCooler.getCharacteristic(id).value;
-  const sensor = (reading: Record<string, unknown>) => sensorCb!({ deviceSerial: SERIAL, ...reading });
-  // A profile for a fully equipped unit, so every optional service is created.
-  const applyProfile = () => profileCb!(SERIAL, {
-    minimumSetPoints: { cool: 16, heat: 10, auto: 16 },
-    maximumSetPoints: { cool: 31, heat: 31, auto: 31 },
-    hasModeHeat: true, hasModeDry: true, hasModeVent: true,
-    hasVaneDir: true, hasVaneSwing: true, hasFanSpeedAuto: true,
   });
-  // A device_update as the cloud's stream delivers it.
-  const stream = (data: Record<string, unknown>) => streamCb!(SERIAL, {
-    deviceSerial: SERIAL, roomTemp: 26.5, spHeat: 23.5, spCool: 24.5, power: 1, operationMode: 'cool',
-    fanSpeed: 'low', airDirection: 'vertical', humidity: null, ...data,
-  });
-  return { handler, value, sent, sensor, accessory, heaterCooler, applyProfile, stream };
+  const value = (id: unknown) => h.heaterCooler.getCharacteristic(id).value;
+  return {
+    ...h, value,
+    sensor: (reading: Record<string, unknown>) => h.sensor({ deviceSerial: SERIAL, ...reading }),
+    // A profile for a fully equipped unit, so every optional service is created.
+    applyProfile: () => h.applyProfile({
+      minimumSetPoints: { cool: 16, heat: 10, auto: 16 },
+      maximumSetPoints: { cool: 31, heat: 31, auto: 31 },
+      hasModeHeat: true, hasModeDry: true, hasModeVent: true,
+      hasVaneDir: true, hasVaneSwing: true, hasFanSpeedAuto: true,
+    }),
+    // A device_update as the cloud's stream delivers it.
+    stream: (data: Record<string, unknown>) => h.stream({
+      deviceSerial: SERIAL, roomTemp: 26.5, spHeat: 23.5, spCool: 24.5, power: 1, operationMode: 'cool',
+      fanSpeed: 'low', airDirection: 'vertical', humidity: null, ...data,
+    }),
+  };
 }
 
 const ALL_SERVICES: Partial<KumoConfig> = {
@@ -213,7 +186,9 @@ test('a device that has never reported status is treated as reachable', async ()
 });
 
 test('reachability still degrades correctly without hap on the platform api', async () => {
-  const { handler } = makeHarness({ withHap: false });
+  const { handler } = makeHarness();
+  // unreachableError reads api.hap when it throws, so removing it now is enough.
+  delete (handler['platform'].api as { hap?: unknown }).hap;
   handler.updateFromZone(zone());
   handler.setCloudConnected(false);
   await assert.rejects(() => handler.getCurrentTemperature(), 'still throws without hap');

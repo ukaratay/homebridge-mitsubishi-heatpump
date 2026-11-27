@@ -18,12 +18,12 @@ import assert from 'node:assert';
 
 import { KumoThermostatAccessory } from '../dist/accessory.js';
 import { FAN_SPEEDS } from '../dist/settings.js';
-import type { Commands, DeviceProfile, FanSpeed, Zone } from '../dist/settings.js';
-import { Characteristic, Service, makeLog, makeAccessory, type FakeService } from './helpers';
+import type { FanSpeed, Zone } from '../dist/settings.js';
+import {
+  Characteristic, Service, makeAccessory, type FakeService, makeAccessoryHarness,
+} from './helpers';
 
 const SERIAL = 'TESTSERIAL001';
-
-type ProfilePayload = Partial<DeviceProfile>;
 
 // hap-nodejs puts setPrimaryService/addLinkedService on every Service and
 // FakeService does not, so the link-aware accessory below grafts them on — the
@@ -34,41 +34,17 @@ type LinkableService = FakeService & {
 };
 
 function makeHarness() {
-  const sendCommandCalls: Array<{ serial: string; commands: Commands }> = [];
-  let profileCb: ((serial: string, profile: ProfilePayload) => void) | null = null;
-  const platform = {
-    Service, Characteristic, log: makeLog(),
-    api: { updatePlatformAccessories() {} },
-    kumoConfig: {},
-  };
-  const kumoAPI = {
-    subscribeToDevice() {},
-    onDeviceProfileUpdate(cb: (serial: string, profile: ProfilePayload) => void) { profileCb = cb; },
-    sendCommand(serial: string, commands: Commands) {
-      sendCommandCalls.push({ serial, commands });
-      return Promise.resolve(true);
-    },
-  };
-  const accessory = makeAccessory('Bedroom');
-  const handler = new KumoThermostatAccessory(
-    platform as never,
-    accessory as never,
-    kumoAPI as never,
-  );
+  const h = makeAccessoryHarness({ accessory: makeAccessory('Bedroom') });
   // TargetFanState and SwingMode are capability-gated, so a realistic harness has
   // to deliver a profile before either exists.
-  profileCb!(SERIAL, {
+  h.applyProfile({
     minimumSetPoints: { cool: 16, heat: 10, auto: 16 },
     maximumSetPoints: { cool: 31, heat: 31, auto: 31 },
     hasModeVent: true, hasModeDry: true, hasModeHeat: true,
     hasVaneDir: true, hasVaneSwing: true, hasFanSpeedAuto: true,
     usesSetPointInDryMode: true,
   });
-  return {
-    handler, accessory, sendCommandCalls,
-    fan: accessory.getServiceById(Service.Fanv2, 'airflow')!,
-    heaterCooler: accessory.getService(Service.HeaterCooler)!,
-  };
+  return h;
 }
 
 // Fan writes are coalesced onto the next tick (see queueFanIntent), so a test has
@@ -348,21 +324,7 @@ function makeLinkAwareHarness() {
     svc.addLinkedService = (s) => linked.push(s);
     return svc;
   };
-  const platform = {
-    Service, Characteristic, log: makeLog(),
-    api: { updatePlatformAccessories() {} },
-    kumoConfig: {},
-  };
-  const kumoAPI = {
-    subscribeToDevice() {},
-    onDeviceProfileUpdate() {},
-    sendCommand() { return Promise.resolve(true); },
-  };
-  const handler = new KumoThermostatAccessory(
-    platform as never,
-    accessory as never,
-    kumoAPI as never,
-  );
+  const { handler } = makeAccessoryHarness({ accessory });
   return { handler, accessory, linked, isPrimary: () => primary };
 }
 

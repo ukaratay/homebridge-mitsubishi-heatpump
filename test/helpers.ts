@@ -1,17 +1,32 @@
-// Mechanical HAP fakes, shared by every accessory test. Only the parts that were
-// byte-identical in each file live here: the Characteristic identity map, the
-// Service name map, and the service/accessory stubs. Per-file setup (harnesses,
-// zone and profile payloads) deliberately stays in its own test file, where the
-// values are the subject rather than scaffolding.
+// Shared test scaffolding for the accessory tests: the HAP fakes (the
+// Characteristic identity map, the Service name map, the service/accessory stubs)
+// and one accessory harness, makeAccessoryHarness, that wires a
+// KumoThermostatAccessory to a fake platform and a fake KumoAPI.
+//
+// The harness holds only the wiring that was identical across the test files. What
+// a test is ABOUT stays in its own file: each file keeps a short local makeHarness
+// that names its config, its accessory and its stream/profile payloads, and a file
+// whose fakes behave differently (a link-aware accessory, a LAN client) builds them
+// locally and passes them in. Grow the shared harness only with wiring every
+// accessory test needs, not with one file's special case.
 //
 // Enum members are READ FROM hap-nodejs at runtime rather than copied here.
 // Copies drift: 10 of the 13 hand-rolled versions of this file encoded
 // TargetHeaterCoolerState.AUTO = 3, which is the old *Thermostat*
 // characteristic's value, and HAP defines AUTO = 0 for HeaterCooler. Typing a
 // hand-copied table would only assert that the wrong number is a number;
-// deriving it makes that class of drift impossible.
+// deriving it makes that class of drift impossible. The harness's `api.hap` is the
+// real HapStatusError and HAPStatus for the same reason.
 
-import { Characteristic as HapCharacteristic } from '@homebridge/hap-nodejs';
+import assert from 'node:assert';
+import {
+  Characteristic as HapCharacteristic,
+  HapStatusError,
+  HAPStatus,
+} from '@homebridge/hap-nodejs';
+
+import { KumoThermostatAccessory } from '../dist/accessory.js';
+import type { Commands, DeviceProfile, KumoConfig } from '../dist/settings.js';
 
 /** A stand-in for a HAP Characteristic. Structural, not a real HAP object. */
 export interface FakeCharacteristic {
@@ -193,6 +208,90 @@ export function makeAccessory(
       if (i >= 0) {
         entries.splice(i, 1);
       }
+    },
+  };
+}
+
+/** The three opt-in display services on: what most behaviour tests want to see. */
+export const SWITCHES_ON: Partial<KumoConfig> = {
+  showDrySwitch: true, showFanOnlySwitch: true, exposeVaneSlat: true,
+};
+
+export interface HarnessOptions {
+  /** Copied, so a test can mutate the returned `kumoConfig` without touching a shared constant. */
+  kumoConfig?: Partial<KumoConfig>;
+  /** Defaults to a fresh makeAccessory(); pass one to model a cached accessory. */
+  accessory?: FakeAccessory;
+  /** The platform's LAN client. Defaults to null: cloud-only. */
+  localClient?: unknown;
+}
+
+/**
+ * One KumoThermostatAccessory on a fake platform and a fake KumoAPI.
+ *
+ * Plain handles out: `sendCommandCalls` and `sent` both record every cloud command
+ * (with and without its serial), `published` every updatePlatformAccessories call,
+ * and `applyProfile` / `stream` / `sensor` deliver an event to the callback the
+ * accessory registered, as the accessory's own serial. `sensor` delivers the
+ * reading exactly as given, so a test can send one with no deviceSerial.
+ */
+export function makeAccessoryHarness(opts: HarnessOptions = {}) {
+  const accessory = opts.accessory ?? makeAccessory();
+  const serial = accessory.context.device.deviceSerial;
+  const kumoConfig: Partial<KumoConfig> = { ...opts.kumoConfig };
+  const sendCommandCalls: Array<{ serial: string; commands: Commands }> = [];
+  const sent: Commands[] = [];
+  const published: FakeAccessory[][] = [];
+  let onStream: ((serial: string, data: object) => void) | null = null;
+  let onProfile: ((serial: string, profile: Partial<DeviceProfile>) => void) | null = null;
+  let onSensor: ((reading: object) => void) | null = null;
+
+  const platform = {
+    Service,
+    Characteristic,
+    log: makeLog(),
+    kumoConfig,
+    localClient: opts.localClient ?? null,
+    api: {
+      updatePlatformAccessories: (a: FakeAccessory[]) => { published.push(a); },
+      hap: {
+        HapStatusError,
+        // HAPStatus is a const enum, so it is read member by member.
+        HAPStatus: { SERVICE_COMMUNICATION_FAILURE: HAPStatus.SERVICE_COMMUNICATION_FAILURE },
+      },
+    },
+  };
+  const kumoAPI = {
+    subscribeToDevice(_serial: string, cb: typeof onStream) { onStream = cb; },
+    onDeviceProfileUpdate(cb: typeof onProfile) { onProfile = cb; },
+    onSensorUpdate(cb: typeof onSensor) { onSensor = cb; },
+    sendCommand(commandSerial: string, commands: Commands) {
+      sendCommandCalls.push({ serial: commandSerial, commands });
+      sent.push(commands);
+      return Promise.resolve(true);
+    },
+  };
+  const handler = new KumoThermostatAccessory(
+    platform as never,
+    accessory as never,
+    kumoAPI as never,
+  );
+
+  return {
+    handler, accessory, kumoConfig, sendCommandCalls, sent, published,
+    heaterCooler: accessory.getService(Service.HeaterCooler)!,
+    fan: accessory.getServiceById(Service.Fanv2, 'airflow')!,
+    applyProfile: (p: Partial<DeviceProfile>) => {
+      assert.ok(onProfile, 'the accessory subscribed to profile updates');
+      onProfile(serial, p);
+    },
+    stream: (data: object) => {
+      assert.ok(onStream, 'the accessory subscribed to the streaming transport');
+      onStream(serial, data);
+    },
+    sensor: (reading: object) => {
+      assert.ok(onSensor, 'the accessory subscribed to sensor readings');
+      onSensor(reading);
     },
   };
 }

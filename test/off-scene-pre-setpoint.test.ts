@@ -37,9 +37,8 @@
 import test from 'node:test';
 import assert from 'node:assert';
 
-import { KumoThermostatAccessory } from '../dist/accessory.js';
 import type { Adapter, Commands, Zone } from '../dist/settings.js';
-import { Characteristic, Service, makeLog, makeAccessory } from './helpers';
+import { Characteristic, makeAccessory, SWITCHES_ON, makeAccessoryHarness } from './helpers';
 
 const SERIAL = 'TESTSERIAL001';
 
@@ -48,31 +47,8 @@ interface SentCommand {
   commands: Commands;
 }
 
-function makeHarness() {
-  const sendCommandCalls: SentCommand[] = [];
-  const platform = {
-    Service,
-    Characteristic,
-    log: makeLog(),
-    api: { updatePlatformAccessories() {} },
-    kumoConfig: { showDrySwitch: true, showFanOnlySwitch: true, exposeVaneSlat: true },
-  };
-  const kumoAPI = {
-    subscribeToDevice() {},
-    onDeviceProfileUpdate() {},
-    sendCommand(serial: string, commands: Commands) {
-      sendCommandCalls.push({ serial, commands });
-      return Promise.resolve(true);
-    },
-  };
-  const accessory = makeAccessory('Living room');
-  const handler = new KumoThermostatAccessory(
-    platform as never,
-    accessory as never,
-    kumoAPI as never,
-  );
-  return { handler, accessory, sendCommandCalls };
-}
+const makeHarness = () =>
+  makeAccessoryHarness({ kumoConfig: SWITCHES_ON, accessory: makeAccessory('Living room') });
 
 const zone = (over: Partial<Adapter> = {}): Zone => ({
   id: 'zone-1',
