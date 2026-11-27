@@ -47,7 +47,7 @@ interface Spies {
 /** Homebridge's `platformAccessory` constructor, as the platform `new`s it. */
 class FakePlatformAccessory {
   context: Record<string, unknown> = {};
-  constructor(public displayName: string, public UUID: string) {}
+  constructor(public displayName: string, public UUID: string, public category?: number) {}
 }
 
 function makeApi(spies: Spies) {
@@ -56,6 +56,7 @@ function makeApi(spies: Spies) {
       Service: {},
       Characteristic: {},
       uuid: { generate: (s: string) => `uuid-${s}` },
+      Categories: { FAN: 3 },
     },
     platformAccessory: FakePlatformAccessory,
     on: () => {},
@@ -189,6 +190,68 @@ test('transient empty zones does NOT unregister cached accessories', async () =>
     await platform.discoverDevices();
     assert.strictEqual(spies.unregister.length, 0, 'cached accessories preserved on transient empty result');
     assert.ok(platform['discoveryRetryTimer'] !== null, 'empty result triggers a retry');
+  } finally {
+    stopRetries(platform);
+  }
+});
+
+// ---- the Fixed Fan Speed accessory -----------------------------------------
+//
+// Each unit has a second accessory, keyed off its serial (see setupFanAccessory
+// in src/accessory.ts for why the fan is not on the AC's own accessory). The
+// stale sweep has to keep it, and has to remove it once the option is off.
+
+const FAN_UUID = `uuid-${SERIAL}:fan`;
+const DISCOVERS_ONE: KumoStub = {
+  login: async () => true,
+  getSites: async () => [SITE],
+  getZones: async () => [ZONE],
+  startStreaming: async () => true,
+  onDeviceConnectionStatusChange: () => {},
+  destroy: () => {},
+};
+
+test('a unit\'s cached Fixed Fan Speed accessory is not swept as stale', async () => {
+  const { platform, spies } = makePlatform(DISCOVERS_ONE);
+  seedHandler(platform, SERIAL, SITE.id);
+  platform.accessories.push(new FakePlatformAccessory('Living room', `uuid-${SERIAL}`) as never);
+  platform.accessories.push(new FakePlatformAccessory('Living room Fixed Fan Speed', FAN_UUID) as never);
+  try {
+    await platform.discoverDevices();
+    assert.deepStrictEqual(spies.unregister, []);
+  } finally {
+    stopRetries(platform);
+  }
+});
+
+test('with fixedFanSpeed: false a cached Fixed Fan Speed accessory is removed', async () => {
+  const { platform, spies } = makePlatform(DISCOVERS_ONE, { fixedFanSpeed: false });
+  seedHandler(platform, SERIAL, SITE.id);
+  const fan = new FakePlatformAccessory('Living room Fixed Fan Speed', FAN_UUID);
+  platform.accessories.push(new FakePlatformAccessory('Living room', `uuid-${SERIAL}`) as never);
+  platform.accessories.push(fan as never);
+  try {
+    await platform.discoverDevices();
+    assert.strictEqual(spies.unregister.length, 1);
+    assert.deepStrictEqual(spies.unregister[0][2], [fan], 'only the fan accessory goes');
+  } finally {
+    stopRetries(platform);
+  }
+});
+
+test('a new Fixed Fan Speed accessory is named for the unit, is a fan, and registers once', () => {
+  const { platform, spies } = makePlatform(DISCOVERS_ONE);
+  try {
+    const fan = platform['fanAccessoryFor'](FAN_UUID, 'Living room') as unknown as FakePlatformAccessory;
+    assert.deepStrictEqual(
+      { name: fan.displayName, uuid: fan.UUID, category: fan.category },
+      { name: 'Living room Fixed Fan Speed', uuid: FAN_UUID, category: 3 });
+    assert.deepStrictEqual(spies.register, [], 'not registered until its handler has built the service');
+
+    platform['registerNew'](fan as never);
+    platform['registerNew'](fan as never);
+    assert.strictEqual(spies.register.length, 1);
+    assert.strictEqual(platform['fanAccessoryFor'](FAN_UUID, 'Renamed'), fan, 'and is found in the cache afterwards');
   } finally {
     stopRetries(platform);
   }

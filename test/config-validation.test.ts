@@ -71,6 +71,16 @@ test('validatePlatformConfig accepts a minimal valid config', () => {
   assert.strictEqual(validatePlatformConfig(VALID as unknown as KumoConfig), null);
 });
 
+// The Fan Auto and Vane Auto switch options existed on a development build and
+// were dropped. A config that still carries them must keep working.
+test('leftover showFanAutoSwitch / showVaneAutoSwitch keys are ignored, not rejected', () => {
+  const leftover = { ...VALID, showFanAutoSwitch: true, showVaneAutoSwitch: true };
+  assert.strictEqual(validatePlatformConfig(leftover as unknown as KumoConfig), null);
+  const { api, events } = makeApi();
+  new KumoV3Platform(makeLog() as never, leftover, api as never);
+  assert.deepStrictEqual(events, ['didFinishLaunching', 'shutdown'], 'the platform starts');
+});
+
 test('pollInterval is optional, and the floor of 5 is inclusive', () => {
   assert.strictEqual(validatePlatformConfig({ ...VALID, pollInterval: 5 } as unknown as KumoConfig), null);
   assert.ok(validatePlatformConfig({ ...VALID, pollInterval: 4.9 } as unknown as KumoConfig));

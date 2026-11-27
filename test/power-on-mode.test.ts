@@ -98,16 +98,6 @@ test('a mode chosen in HomeKit is remembered without waiting for the unit to rep
   assert.deepStrictEqual(sent, [{ operationMode: 'heat' }]);
 });
 
-test('the fan tile turning an off unit on uses the same remembered mode', async () => {
-  const { handler, sent } = makeHarness();
-  handler.updateFromZone(zone({ operationMode: 'heat' }));
-  handler.updateFromZone(zone(OFF));
-
-  await handler.setFanActive(Active.ACTIVE);
-
-  assert.deepStrictEqual(sent, [{ operationMode: 'heat' }]);
-});
-
 // ---- Dry and Fan-only are not remembered --------------------------------------
 
 // The picker cannot show them: both read as COOL while they run. A unit last on

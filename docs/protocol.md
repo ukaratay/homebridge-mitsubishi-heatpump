@@ -195,13 +195,22 @@ One accessory per indoor unit.
 | `TargetHeaterCoolerState` | Heat / cool / auto, narrowed to what the unit's profile supports |
 | `CurrentTemperature` | From the paired wireless sensor when there is one, otherwise the unit's own thermistor |
 | `HeatingThresholdTemperature`, `CoolingThresholdTemperature` | These **are** the setpoint controls in every mode. There is deliberately no `TargetTemperature` |
-| `SwingMode` | Vane swing, on units that have one |
+| `SwingMode` | Vane swing, on units that have one. Reads on only while `vaneDir` is `swing`. On sends `swing`; off sends `auto` from any state. A `Slats` tilt in the same request beats off and loses to on |
 | `TemperatureDisplayUnits` | Settable. The Home app ignores it; Eve and others honour it |
 
-**Fanv2** (linked, subtype `airflow`): `Active`, `CurrentFanState`, `RotationSpeed`
-(`minValue` 0, `maxValue` 100, `minStep` 25 — five detents, one per named speed; a head with four real speeds,
-such as an MLZ-KX cassette, cannot have five distinct ones), and
-`TargetFanState` on units whose profile reports an auto fan.
+**Fixed Fan Speed** (a second accessory per unit, UUID from `<serial>:fan`,
+`fixedFanSpeed`, on by default): one `Fanv2` with `Active` and `RotationSpeed`
+(`minValue` 0, `maxValue` 100, `minStep` 20: five positions from 20, one per named speed;
+a head with four real speeds, such as an MLZ-KX cassette, cannot have five distinct ones).
+`Active` reads on only while the unit is on and `fanSpeed` is a known speed other than
+`auto`. Off, or a written speed of 0, sends `auto`; on sends the request's speed, or the
+speed the slider shows when the request carries none. It never changes the unit's power.
+A resolved fan value is held for 500 ms and only the newest is sent, because Apple Home
+writes each step of a slider drag as its own request.
+It is a separate accessory because Apple Home stores every writable value of a fan that
+shares an accessory with the HeaterCooler in each scene containing the AC, linked or not,
+and shows none of them in its scene editor. There is no `TargetFanState`: Apple Home does
+not draw it. See `setupFanAccessory` in `src/accessory.ts`.
 
 **Optional, per unit:**
 

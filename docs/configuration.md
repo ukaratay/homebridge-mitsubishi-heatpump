@@ -55,8 +55,9 @@ and stops again on reconnect.
 | `debug` | boolean | No | Verbose logging (default false). See [Debug](#debug) |
 | `showHumiditySensor` | boolean | No | Expose indoor humidity as a `HumiditySensor` (default **true**). Turn off if humidity dominates the tile in the Home app |
 | `showDrySwitch` | boolean | No | Add a per-unit Dry switch (default false). Added only on units whose profile reports dry |
-| `showFanOnlySwitch` | boolean | No | Add a per-unit Fan-only switch (default false). This is fan-*only* mode; fan speed while heating or cooling is already on the main tile |
-| `exposeVaneSlat` | boolean | No | Expose vane angles as a `Slats` service (default false). Apple Home files `Slats` under window coverings — see the warning in the [README](../README.md#vane-and-swing) |
+| `showFanOnlySwitch` | boolean | No | Add a per-unit Fan-only switch (default false). This is fan-*only* mode; fan speed while heating or cooling is on the Fixed Fan Speed tile |
+| `fixedFanSpeed` | boolean | No | Add a "&lt;unit&gt; Fixed Fan Speed" fan tile beside each unit (default **true**; only `false` turns it off). Off is fan auto; on holds the slider's speed. It is a separate accessory, so a scene changes the fan only if it includes this tile. It reads off while the unit is off and never turns the unit on. With `false` HomeKit has no fan control. See [Fan auto and scenes](../README.md#fan-auto-and-scenes) |
+| `exposeVaneSlat` | boolean | No | Expose vane angles as a `Slats` service (default false). It is the only way to set a fixed angle from Home, since swing off means vane auto. Apple Home files `Slats` under window coverings — see the warning in the [README](../README.md#vane-and-swing) |
 | `localControl` | boolean | No | Control units over the LAN (default false). **Currently non-functional through no fault of the plugin** — see [README → Local LAN control](../README.md#local-lan-control) |
 | `localPollInterval` | number | No | Seconds between LAN status polls when `localControl` is on (default 15) |
 | `localControlIps` | object | No | `{ "<deviceSerial>": "<ip>" }` to skip LAN discovery for specific units. **JSON editor only** — see [UI coverage](#ui-coverage) |

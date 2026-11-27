@@ -32,6 +32,8 @@ import type { Commands, DeviceProfile, KumoConfig } from '../dist/settings.js';
 export interface FakeCharacteristic {
   value: unknown;
   props?: Record<string, unknown>;
+  /** The handler the plugin bound with onSet, kept so a test can write through it: see hapWrite. */
+  setHandler?: (value: unknown) => unknown;
   onGet(handler?: unknown): FakeCharacteristic;
   onSet(handler?: unknown): FakeCharacteristic;
   setProps(props: Record<string, unknown>): FakeCharacteristic;
@@ -55,6 +57,8 @@ export interface FakeService {
   getCharacteristic(id: unknown): FakeCharacteristic;
   setCharacteristic(id: unknown, value: unknown): FakeService;
   updateCharacteristic(id: unknown, value: unknown): FakeService;
+  /** Declares a characteristic; real HAP only uses it to skip a warning, so this does nothing. */
+  addOptionalCharacteristic(id: unknown): void;
 }
 
 /** A stand-in for a Homebridge PlatformAccessory. */
@@ -136,7 +140,8 @@ export function makeCharacteristic(): FakeCharacteristic {
     onGet() {
       return ch;
     },
-    onSet() {
+    onSet(handler?: unknown) {
+      ch.setHandler = handler as FakeCharacteristic['setHandler'];
       return ch;
     },
     setProps(props: Record<string, unknown>) {
@@ -145,6 +150,19 @@ export function makeCharacteristic(): FakeCharacteristic {
     },
   };
   return ch;
+}
+
+/**
+ * Write a characteristic the way hap-nodejs does: run the handler the plugin
+ * bound with onSet, then store the value once it resolves
+ * (Characteristic.handleSetRequest awaits the handler, then assigns `value`).
+ * The handler starts synchronously, so calling this for each write of a request
+ * in a plain loop, without awaiting, is how hap-nodejs dispatches the request.
+ */
+export async function hapWrite(ch: FakeCharacteristic, value: unknown): Promise<void> {
+  assert.ok(ch.setHandler, 'the plugin bound an onSet handler to this characteristic');
+  await ch.setHandler(value);
+  ch.value = value;
 }
 
 export function makeService(type: string, name?: string, subtype?: string): FakeService {
@@ -168,6 +186,7 @@ export function makeService(type: string, name?: string, subtype?: string): Fake
       svc.getCharacteristic(id).value = value;
       return svc;
     },
+    addOptionalCharacteristic() { /* see the interface */ },
   };
   return svc;
 }
@@ -222,8 +241,22 @@ export interface HarnessOptions {
   kumoConfig?: Partial<KumoConfig>;
   /** Defaults to a fresh makeAccessory(); pass one to model a cached accessory. */
   accessory?: FakeAccessory;
+  /**
+   * The unit's Fixed Fan Speed accessory. Defaults to a fresh one, or to none
+   * with `fixedFanSpeed: false`, as the platform decides it; pass one to model a
+   * cached accessory, or null for none.
+   */
+  fanAccessory?: FakeAccessory | null;
   /** The platform's LAN client. Defaults to null: cloud-only. */
   localClient?: unknown;
+  /** Log methods to use instead of the silent ones, for lines the constructor writes. */
+  log?: Partial<FakeLog>;
+  /**
+   * Keep the real FAN_HOLD_MS. By default the harness sets it to 0, which
+   * turns the hold off: a fan write is then out one tick after its request, so
+   * the many tests that are not about the hold neither wait for it nor race it.
+   */
+  realFanHold?: boolean;
 }
 
 /**
@@ -239,6 +272,11 @@ export function makeAccessoryHarness(opts: HarnessOptions = {}) {
   const accessory = opts.accessory ?? makeAccessory();
   const serial = accessory.context.device.deviceSerial;
   const kumoConfig: Partial<KumoConfig> = { ...opts.kumoConfig };
+  const fanAccessory = opts.fanAccessory !== undefined
+    ? opts.fanAccessory
+    : kumoConfig.fixedFanSpeed === false
+      ? null
+      : makeAccessory(`${accessory.displayName} Fixed Fan Speed`, `${serial}-fan`);
   const sendCommandCalls: Array<{ serial: string; commands: Commands }> = [];
   const sent: Commands[] = [];
   const published: FakeAccessory[][] = [];
@@ -249,7 +287,7 @@ export function makeAccessoryHarness(opts: HarnessOptions = {}) {
   const platform = {
     Service,
     Characteristic,
-    log: makeLog(),
+    log: { ...makeLog(), ...opts.log },
     kumoConfig,
     localClient: opts.localClient ?? null,
     api: {
@@ -275,12 +313,17 @@ export function makeAccessoryHarness(opts: HarnessOptions = {}) {
     platform as never,
     accessory as never,
     kumoAPI as never,
+    (fanAccessory ?? undefined) as never,
   );
+  if (!opts.realFanHold) {
+    (handler as unknown as { FAN_HOLD_MS: number }).FAN_HOLD_MS = 0;
+  }
 
   return {
-    handler, accessory, kumoConfig, sendCommandCalls, sent, published,
+    handler, accessory, fanAccessory, kumoConfig, sendCommandCalls, sent, published,
     heaterCooler: accessory.getService(Service.HeaterCooler)!,
-    fan: accessory.getServiceById(Service.Fanv2, 'airflow')!,
+    /** The Fanv2 on the Fixed Fan Speed accessory. Null-asserted: absent with `fixedFanSpeed: false`. */
+    fan: fanAccessory?.getService(Service.Fanv2) as FakeService,
     applyProfile: (p: Partial<DeviceProfile>) => {
       assert.ok(onProfile, 'the accessory subscribed to profile updates');
       onProfile(serial, p);

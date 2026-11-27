@@ -166,7 +166,7 @@ test('a cloud poll keeps the fan speed and vane the stream reported', async () =
   const status = handler['currentStatus']!;
   assert.strictEqual(status.fanSpeed, 'quiet');
   assert.strictEqual(status.airDirection, 'swing');
-  assert.strictEqual(await handler.getTargetFanState(), Characteristic.TargetFanState.MANUAL);
+  assert.strictEqual(await handler.getFanActive(), Characteristic.Active.ACTIVE, 'still a fixed speed');
 });
 
 test('before anything reports a fan speed, a poll still defaults it to auto', () => {
@@ -205,19 +205,6 @@ test('the state PUSHED to HomeKit by the poll is idle too, not just the cached r
 
   const pushed = h.heaterCooler().chars.get(Characteristic.CurrentHeaterCoolerState)?.value;
   assert.strictEqual(pushed, Characteristic.CurrentHeaterCoolerState.IDLE);
-});
-
-test('the fan reports idle rather than blowing air while the compressor is in standby', async () => {
-  const { handler, emitStreaming } = makeHarness();
-  emitStreaming(streamingUpdate({ displayConfig: { standby: true, filter: false, defrost: false } }));
-
-  handler.updateFromZone(cloudZone({ roomTemp: 24, operationMode: 'cool' }));
-
-  assert.strictEqual(
-    await handler.getCurrentFanState(),
-    Characteristic.CurrentFanState.IDLE,
-    'the second consumer of the same flag',
-  );
 });
 
 test('a unit that is genuinely running still reports cooling after a poll', async () => {
