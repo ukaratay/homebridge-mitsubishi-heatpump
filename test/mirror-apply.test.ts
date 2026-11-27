@@ -42,7 +42,6 @@ function makeHarness() {
     platform as never,
     makeAccessory('Target', SERIAL) as never,
     kumoAPI as never,
-    30,
   );
   const setProfile = (p: DeviceProfile) => profileCb!(SERIAL, p);
   return { handler, sendCommandCalls, setProfile };

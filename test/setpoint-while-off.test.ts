@@ -65,7 +65,6 @@ function makeHarness() {
     platform as never,
     accessory as never,
     kumoAPI as never,
-    30,
   );
   return { handler, accessory, sendCommandCalls };
 }

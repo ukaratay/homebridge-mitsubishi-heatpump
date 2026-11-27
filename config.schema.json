@@ -187,7 +187,6 @@
         "degradedPollInterval",
         "disablePolling",
         "streamingHealthCheckInterval",
-        "streamingStaleThreshold",
         {
           "key": "excludeDevices",
           "type": "array",

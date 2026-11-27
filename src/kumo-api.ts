@@ -136,6 +136,12 @@ export class KumoAPI {
   // once — these events arrive continuously, so an unlatched warning would flood the
   // log. The password counter is consecutive, so a single odd event (an adapter_update
   // that legitimately carries no credential) does not trip it.
+  //
+  // Counted only once the local gather has asked for credentials
+  // (requestAdapterStatus): KumoAPI does not know whether local control is on, and
+  // the connect-time adapterStatus nudge below reaches cloud-only installs too, where
+  // the warning's "set localControl: false" advice could not silence it.
+  private localCredsWanted: boolean = false;
   private adapterUpdatesWithoutPassword: number = 0;
   private warnedNoAdapterPassword: boolean = false;
   private warnedNoCryptoSerial: boolean = false;
@@ -815,7 +821,7 @@ export class KumoAPI {
         if (data.deviceSerial && password) {
           this.adapterUpdatesWithoutPassword = 0;
           this.adapterPasswords.set(data.deviceSerial, password);
-        } else if (data.deviceSerial) {
+        } else if (data.deviceSerial && this.localCredsWanted) {
           // An adapter_update for a real device that carried no password at all.
           // Three in a row is the cloud having stopped sending it, not a one-off.
           this.adapterUpdatesWithoutPassword++;
@@ -868,11 +874,6 @@ export class KumoAPI {
         for (const callback of this.deviceProfileCallbacks) {
           this.safeCall(`Profile update callback error for ${serial}`, () => callback(serial, profile));
         }
-      });
-
-      this.socket.on('acoil_update', (data: any) => {
-        const serial = data.deviceSerial || 'unknown';
-        this.log.debug(`A-coil update for ${serial}`);
       });
 
       // A paired wireless sensor reported. This is the cloud's replacement for the
@@ -1017,6 +1018,7 @@ export class KumoAPI {
 
   /** Ask the cloud to re-push a device's `adapter_update` (carries the password). */
   requestAdapterStatus(serial: string): void {
+    this.localCredsWanted = true;
     this.socket?.emit('force_adapter_request', serial, 'adapterStatus');
   }
 

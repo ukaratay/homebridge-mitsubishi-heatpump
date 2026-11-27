@@ -92,7 +92,6 @@ function makeHarness(
     platform as never,
     accessory as never,
     kumoAPI as never,
-    30,
   );
   profileCb!(SERIAL, {
     minimumSetPoints: { cool: 16, heat: 10, auto: 16 },

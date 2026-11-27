@@ -8,6 +8,15 @@ import {
 import { cToF, quantizeSetpointInRange, sameSetpoint } from './temperature';
 
 /**
+ * The unit-state fields processZoneUpdate reads, whichever transport delivered
+ * them: the zones poll passes its adapter record as is, streaming and local build
+ * one. Zone id and serial are not in it: the serial is this accessory's own.
+ */
+type UnitReading = Pick<Adapter,
+  'roomTemp' | 'spHeat' | 'spCool' | 'spAuto' | 'humidity' | 'power' | 'operationMode' |
+  'previousOperationMode' | 'fanSpeed' | 'airDirection' | 'rssi'>;
+
+/**
  * Fan speed <-> HomeKit RotationSpeed, on the Fanv2 service.
  *
  * The slider carries ONLY the five named airflow levels, evenly spaced across the
@@ -86,7 +95,9 @@ export class KumoThermostatAccessory {
   private lastLocalUpdateTs: number = 0;
   // While a local poll has arrived within this window, local is the authoritative
   // status source and cloud updates are dropped (the cloud lags ~7-10s and would
-  // otherwise clobber fresher local data). Should exceed the local poll interval.
+  // otherwise clobber fresher local data). Meant to exceed the local poll
+  // interval; the schema allows localPollInterval up to 120 s, so at 45 s or
+  // more a cloud update can land between two local polls.
   private readonly LOCAL_AUTHORITATIVE_MS = 45000;
   // Cloud-reported adapter reachability from `device_status_v2`. null = nothing
   // reported yet (treated as reachable). See setCloudConnected.
@@ -151,8 +162,8 @@ export class KumoThermostatAccessory {
   // Timestamp (ms) of the most recent HomeKit "off" request. Within
   // OFF_SUPPRESS_WINDOW_MS of it, setpoint writes are suppressed (cached + echoed
   // but not sent). An "AC off" scene captures each thermostat's full state and
-  // re-pushes its setpoints (TargetTemperature, and for an AUTO unit the two
-  // threshold handles) alongside OFF; HomeKit dispatches them concurrently in an
+  // re-pushes its setpoints (the two threshold characteristics) alongside OFF;
+  // HomeKit dispatches them concurrently in an
   // arbitrary order. A setpoint landing after the off reaches the LAN adapter as
   // a bare, mode-less write (local commands carry no power field — see
   // local-api.ts) and powers the unit back on. The unit is being turned off —
@@ -219,11 +230,6 @@ export class KumoThermostatAccessory {
     private readonly platform: KumoV3Platform,
     private readonly accessory: PlatformAccessory,
     private readonly kumoAPI: KumoAPI,
-    // Unused: polling is site-level on the platform (platform.ts:startSitePoller),
-    // and nothing per-accessory has a timer of its own. Kept because platform.ts
-    // still passes it at both construction sites; removing it is a signature
-    // change across that file and every test harness.
-    _pollIntervalSeconds?: number,
   ) {
     this.deviceSerial = this.accessory.context.device.deviceSerial;
     this.siteId = this.accessory.context.device.siteId;
@@ -297,10 +303,10 @@ export class KumoThermostatAccessory {
       .onSet(this.setCoolingThresholdTemperature.bind(this));
 
     // --- fan ---
-    // Fan speed and swing live on a Fanv2 service, not here. See setupFanService.
-    // An accessory cached by an earlier version carries RotationSpeed (and maybe
-    // SwingMode) on the HeaterCooler; strip them so the unit does not end up with
-    // two competing fan controls.
+    // Fan speed lives on a Fanv2 service, not here. See setupFanService. Swing
+    // does stay on the HeaterCooler (see applyDeviceProfile). An accessory cached
+    // by an earlier version carries RotationSpeed on the HeaterCooler; strip it so
+    // the unit does not end up with two competing fan controls.
     this.removeStaleCharacteristic(this.service, this.platform.Characteristic.RotationSpeed);
     this.setupFanService();
 
@@ -389,7 +395,7 @@ export class KumoThermostatAccessory {
     //
     // Guarded on the method existing for the same reason linkSecondaryService is:
     // this runs during construction, where a throw takes out the whole accessory,
-    // and a KumoAPI built before sensor_update existed does not carry it.
+    // and a stubbed KumoAPI (the test fakes) need not carry it.
     if (typeof this.kumoAPI.onSensorUpdate === 'function') {
       this.kumoAPI.onSensorUpdate((reading: SensorReading) => {
         if (reading && reading.deviceSerial === this.deviceSerial) {
@@ -585,7 +591,7 @@ export class KumoThermostatAccessory {
     }
     this.service.getCharacteristic(T).setProps({ validValues: modes });
 
-    // Swing lives on the main tile when the unit supports it.
+    // Fan auto/manual is TargetFanState on the Fanv2, when the unit has fan auto.
     if (profile.hasFanSpeedAuto && !this.targetFanStateRegistered && this.fanService) {
       this.fanService.getCharacteristic(this.platform.Characteristic.TargetFanState)
         .onGet(this.getTargetFanState.bind(this))
@@ -607,8 +613,9 @@ export class KumoThermostatAccessory {
       // therefore invisible unless the user has opted into "Show as Separate
       // Tiles" — and with the Slats service off by default, that would leave vane
       // control unreachable in the Home app on a default install.
-      // Home Assistant's own HeaterCooler migration (core#148231) moves only
-      // RotationSpeed and keeps swing on the climate service for the same reason.
+      // Home Assistant's own HeaterCooler migration (core#148231) also moves only
+      // the fan controls and keeps swing on the climate service. That PR states no
+      // rendering reason, so it is precedent for the layout, not evidence for it.
       this.service.getCharacteristic(C.SwingMode)
         .onGet(this.getSwingMode.bind(this))
         .onSet(this.setSwingMode.bind(this));
@@ -635,7 +642,7 @@ export class KumoThermostatAccessory {
     }
 
     // Add / remove the fan-only switch based on device capability AND config.
-    // Fan speed now lives on the HeaterCooler tile, so this switch is only for
+    // Fan speed lives on the linked Fanv2 service, so this switch is only for
     // fan-ONLY mode (no heating or cooling) and is off by default.
     if (profile.hasModeVent && this.platform.kumoConfig.showFanOnlySwitch === true) {
       this.setupFanOnlySwitch();
@@ -951,37 +958,25 @@ export class KumoThermostatAccessory {
 
     this.platform.log.debug(`Streaming update received for ${deviceSerial}: temp=${data.roomTemp}, mode=${data.operationMode}, power=${data.power}`);
 
-    // Convert streaming data format to zone format for processing
-    const zoneUpdate: Partial<Zone> = {
-      adapter: {
-        id: data.id || '',
-        deviceSerial: deviceSerial,
-        roomTemp: data.roomTemp!,
-        spHeat: data.spHeat!,
-        spCool: data.spCool!,
-        spAuto: data.spAuto || null,
-        humidity: data.humidity ?? null,
-        power: data.power!,
-        operationMode: data.operationMode!,
-        // The unit's own memory of the mode it was last on in (docs/protocol.md).
-        // Only device_update carries it; it seeds the power-on mode, see
-        // lastActiveMode.
-        previousOperationMode:
-          (data as { previousOperationMode?: string }).previousOperationMode || data.operationMode!,
-        fanSpeed: data.fanSpeed || 'auto',
-        airDirection: data.airDirection || 'auto',
-        connected: true,
-        isSimulator: false,
-        hasSensor: data.humidity !== null && data.humidity !== undefined,
-        hasMhk2: false,
-        scheduleOwner: 'adapter',
-        scheduleHoldEndTime: 0,
-        rssi: data.rssi,
-      },
-    } as Zone;
-
-    // Use existing update processing logic
-    this.processZoneUpdate(zoneUpdate as Zone, 'streaming', updateTimestamp);
+    // Use existing update processing logic. device_update carries no zone id, so
+    // keep the last one known.
+    this.processZoneUpdate(this.currentStatus?.id || '', {
+      roomTemp: data.roomTemp!,
+      spHeat: data.spHeat!,
+      spCool: data.spCool!,
+      spAuto: data.spAuto || null,
+      humidity: data.humidity ?? null,
+      power: data.power!,
+      operationMode: data.operationMode!,
+      // The unit's own memory of the mode it was last on in (docs/protocol.md).
+      // Only device_update carries it; it seeds the power-on mode, see
+      // lastActiveMode.
+      previousOperationMode:
+        (data as { previousOperationMode?: string }).previousOperationMode || data.operationMode!,
+      fanSpeed: data.fanSpeed || 'auto',
+      airDirection: data.airDirection || 'auto',
+      rssi: data.rssi,
+    }, 'streaming', updateTimestamp);
 
     // Extract extended fields only available from streaming (not in Zone format)
     if (this.currentStatus) {
@@ -1163,7 +1158,7 @@ export class KumoThermostatAccessory {
   public updateFromZone(zone: Zone) {
     this.applyZoneSensors(zone.adapter);
     const updateTimestamp = Date.now();
-    this.processZoneUpdate(zone, 'polling', updateTimestamp);
+    this.processZoneUpdate(zone.id, zone.adapter, 'polling', updateTimestamp);
   }
 
   /**
@@ -1182,32 +1177,18 @@ export class KumoThermostatAccessory {
       return;
     }
     const updateTimestamp = Date.now();
-    const zoneUpdate: Partial<Zone> = {
-      id: this.currentStatus?.id || '',
-      adapter: {
-        id: this.currentStatus?.id || '',
-        deviceSerial: this.deviceSerial,
-        roomTemp: status.roomTemp!,
-        spHeat: status.spHeat!,
-        spCool: status.spCool!,
-        spAuto: status.spAuto ?? null,
-        humidity: status.humidity ?? this.currentStatus?.humidity ?? null,
-        power: status.power!,
-        operationMode: status.operationMode!,
-        previousOperationMode: status.operationMode!,
-        fanSpeed: status.fanSpeed || 'auto',
-        airDirection: status.airDirection || 'auto',
-        connected: true,
-        isSimulator: false,
-        hasSensor: (status.humidity ?? this.currentStatus?.humidity) !== null &&
-          (status.humidity ?? this.currentStatus?.humidity) !== undefined,
-        hasMhk2: false,
-        scheduleOwner: 'adapter',
-        scheduleHoldEndTime: 0,
-      },
-    } as Zone;
-
-    this.processZoneUpdate(zoneUpdate as Zone, 'local', updateTimestamp);
+    this.processZoneUpdate(this.currentStatus?.id || '', {
+      roomTemp: status.roomTemp!,
+      spHeat: status.spHeat!,
+      spCool: status.spCool!,
+      spAuto: status.spAuto ?? null,
+      humidity: status.humidity ?? this.currentStatus?.humidity ?? null,
+      power: status.power!,
+      operationMode: status.operationMode!,
+      previousOperationMode: status.operationMode!,
+      fanSpeed: status.fanSpeed || 'auto',
+      airDirection: status.airDirection || 'auto',
+    }, 'local', updateTimestamp);
 
     // Filter / defrost / standby come straight from the local status.
     if (this.currentStatus) {
@@ -1254,7 +1235,12 @@ export class KumoThermostatAccessory {
     return this.kumoAPI.sendCommand(this.deviceSerial, commands);
   }
 
-  private processZoneUpdate(zone: Zone, source: 'streaming' | 'polling' | 'local', timestamp: number) {
+  private processZoneUpdate(
+    zoneId: string,
+    reading: UnitReading,
+    source: 'streaming' | 'polling' | 'local',
+    timestamp: number,
+  ) {
     try {
       // When local control is healthy, it is the authoritative status source: drop
       // cloud (streaming/polling) updates that would clobber fresher local data,
@@ -1292,9 +1278,9 @@ export class KumoThermostatAccessory {
       this.platform.log.debug(`Processing ${source} update for ${this.deviceSerial}`);
 
       // Validate required fields
-      if (zone.adapter.roomTemp === undefined || zone.adapter.roomTemp === null) {
-        this.platform.log.error(`Device ${this.deviceSerial} has invalid roomTemp: ${zone.adapter.roomTemp}`);
-        this.platform.log.debug('Zone adapter data:', JSON.stringify(zone.adapter));
+      if (reading.roomTemp === undefined || reading.roomTemp === null) {
+        this.platform.log.error(`Device ${this.deviceSerial} has invalid roomTemp: ${reading.roomTemp}`);
+        this.platform.log.debug('Zone adapter data:', JSON.stringify(reading));
         return;
       }
 
@@ -1308,10 +1294,10 @@ export class KumoThermostatAccessory {
       const sensorFresh = this.sensorReadingFresh();
       const effectiveRoomTemp = sensorFresh && this.sensorTemp !== null
         ? this.sensorTemp
-        : zone.adapter.roomTemp;
+        : reading.roomTemp;
       const effectiveHumidity = sensorFresh && this.sensorHumidity !== null
         ? this.sensorHumidity
-        : zone.adapter.humidity;
+        : reading.humidity;
 
       // Check if device has a humidity reading and add the sensor service if so.
       // CurrentRelativeHumidity is NOT a valid characteristic on HeaterCooler
@@ -1331,11 +1317,11 @@ export class KumoThermostatAccessory {
 
       // Convert adapter data to DeviceStatus format
       const status: DeviceStatus = {
-        id: zone.id,
-        deviceSerial: zone.adapter.deviceSerial,
-        rssi: zone.adapter.rssi || 0,
-        power: zone.adapter.power,
-        operationMode: zone.adapter.operationMode,
+        id: zoneId,
+        deviceSerial: this.deviceSerial,
+        rssi: reading.rssi || 0,
+        power: reading.power,
+        operationMode: reading.operationMode,
         humidity: effectiveHumidity,
         // The zones payload carries neither fan speed nor vane (they live in the
         // streaming `device_update` and in GET /devices/{serial}); both are optional
@@ -1345,12 +1331,12 @@ export class KumoThermostatAccessory {
         // HomeKit each time, and changed mirror.ts's signature, so every
         // alternation between the two update sources pushed fan 'auto' to mirror
         // targets. The streaming and local paths always fill both fields.
-        fanSpeed: zone.adapter.fanSpeed || this.currentStatus?.fanSpeed || 'auto',
-        airDirection: zone.adapter.airDirection || this.currentStatus?.airDirection || 'auto',
+        fanSpeed: reading.fanSpeed || this.currentStatus?.fanSpeed || 'auto',
+        airDirection: reading.airDirection || this.currentStatus?.airDirection || 'auto',
         roomTemp: effectiveRoomTemp,
-        spCool: zone.adapter.spCool,
-        spHeat: zone.adapter.spHeat,
-        spAuto: zone.adapter.spAuto,
+        spCool: reading.spCool,
+        spHeat: reading.spHeat,
+        spAuto: reading.spAuto,
         // The sensor battery is in no zone/streaming payload — it arrives only on
         // sensor_update — so carry it across this rebuild of the status object.
         sensorBattery: this.currentStatus?.sensorBattery ?? null,
@@ -1370,7 +1356,7 @@ export class KumoThermostatAccessory {
 
       this.currentStatus = status;
       this.rememberActiveMode();
-      this.seedActiveMode(zone.adapter.previousOperationMode);
+      this.seedActiveMode(reading.previousOperationMode);
       // Both setpoints, not one "target": on HeaterCooler each threshold is the
       // setpoint for its own mode and the band is live in AUTO, so there is no
       // single target temperature to name.
@@ -1421,11 +1407,11 @@ export class KumoThermostatAccessory {
     // HeaterCooler has no single TargetTemperature; the two thresholds below
     // carry the setpoints in every mode.
 
-    // Keep the AUTO-mode threshold characteristics in sync with the live band.
-    // The Home app only surfaces these in AUTO; refreshing them in any mode is
-    // harmless (each is independent within its own min/max props, so a unit
+    // Keep both threshold characteristics in sync with the unit's setpoints.
+    // The Home app shows the heating one in HEAT, the cooling one in COOL and
+    // both in AUTO; each is independent within its own min/max props, so a unit
     // sitting in heat/cool with an inverted spHeat>spCool pair never trips a
-    // HomeKit constraint — the values just aren't shown until AUTO is selected).
+    // HomeKit constraint.
     if (status.spHeat !== undefined && status.spHeat !== null && !isNaN(status.spHeat)) {
       this.service.updateCharacteristic(
         this.platform.Characteristic.HeatingThresholdTemperature,
@@ -1948,15 +1934,15 @@ export class KumoThermostatAccessory {
     }, 100);
   }
 
-  // ---- Fanv2: speed, auto/manual, swing -----------------------------------
+  // ---- Fanv2: speed, auto/manual ------------------------------------------
 
   /**
    * The Fanv2 service: everything about air movement in one place.
    *
    * HeaterCooler cannot express "fan auto" — TargetFanState is a Fanv2
    * characteristic — which is the whole reason this service exists. Speed lives
-   * on RotationSpeed (five detents, no zero), auto/manual on TargetFanState,
-   * and swing on SwingMode once the profile confirms the unit has one.
+   * on RotationSpeed (five detents, no zero) and auto/manual on TargetFanState.
+   * Swing is not here: SwingMode stays on the HeaterCooler (applyDeviceProfile).
    */
   private setupFanService(): void {
     if (this.fanService) {
@@ -2160,7 +2146,9 @@ export class KumoThermostatAccessory {
   async getTargetFanState(): Promise<CharacteristicValue> {
     this.assertReachable();
     const C = this.platform.Characteristic.TargetFanState;
-    return this.currentStatus?.fanSpeed === 'auto' ? C.AUTO : C.MANUAL;
+    // normalizeFanSpeed, as the push path does: some units report the capitalised
+    // `Auto`, and an exact match would read it back as MANUAL.
+    return normalizeFanSpeed(this.currentStatus?.fanSpeed ?? '') === 'auto' ? C.AUTO : C.MANUAL;
   }
 
   async setTargetFanState(value: CharacteristicValue): Promise<void> {
@@ -2203,8 +2191,20 @@ export class KumoThermostatAccessory {
       // What the request resolved to, at info: the handlers above only log what
       // each characteristic was sent, and a scene sends several that disagree.
       this.platform.log.info(`[FAN] ${this.accessory.displayName}: -> "${speed}"`);
-      void this.writeFanSpeed(speed);
+      this.writeFanSpeed(speed).catch((err) => this.queuedWriteFailed('FAN SPEED', err));
     }, 0);
+  }
+
+  /**
+   * A queued fan write runs from a bare setTimeout, where nothing above it
+   * catches: a rejection there would be an unhandled one. Both transports
+   * report failure by returning false, so this is a backstop, not a code path.
+   */
+  private queuedWriteFailed(label: string, err: unknown): void {
+    this.platform.log.error(
+      `[${label}] ${this.accessory.displayName}: write failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    this.revertSoon();
   }
 
   async getRotationSpeed(): Promise<CharacteristicValue> {
@@ -2523,8 +2523,9 @@ export class KumoThermostatAccessory {
    * Only an explicit statement removes it: `hasSensor === false`, no MHK2, and no
    * reading in the record. A reading that is merely missing never does (see the
    * note in processZoneUpdate). And only the real zones record may be passed in:
-   * the streaming and local paths fill hasSensor from the humidity field, so they
-   * say nothing about the hardware.
+   * it is the only source that states hasSensor and hasMhk2. The streaming and
+   * local paths carry a UnitReading, which has neither, so they say nothing about
+   * the hardware.
    *
    * While the record says there is no source, a humidity in device_update does
    * not re-create the tile. Without that, a stream that still carried one for
@@ -2727,12 +2728,11 @@ export class KumoThermostatAccessory {
   }
 
   /**
-   * Write one edge of the AUTO setpoint band. HomeKit pushes these when the user
-   * drags the range handles in AUTO: spHeat is the low/heat bound, spCool the
-   * high/cool bound. Mirrors setTargetTemperature — same powered-off guard (the
-   * v3 API 400s a bare setpoint on an off unit, see 1.5.2), optimistic echo, and
-   * revert-on-failure. spHeat/spCool are always the per-mode setpoints, so this
-   * is safe even on the rare out-of-AUTO write.
+   * Write one setpoint: the heating threshold (spHeat) or the cooling threshold
+   * (spCool). This is the setpoint writer in every mode: HomeKit sends the
+   * heating one in HEAT, the cooling one in COOL, and either edge of the band in
+   * AUTO. Powered-off guard (the v3 API 400s a bare setpoint on an off unit, see
+   * 1.5.2), optimistic echo, and revert-on-failure.
    */
   private async setThresholdTemperature(field: 'spHeat' | 'spCool', temp: number): Promise<void> {
     const characteristic = field === 'spHeat'
@@ -2769,7 +2769,7 @@ export class KumoThermostatAccessory {
 
     // Hold briefly so an "AC off" dispatched alongside this handle wins
     // regardless of order (see setpointWriteGen). Keyed per field so the two
-    // AUTO handles don't supersede each other.
+    // thresholds don't supersede each other.
     const hold = await this.holdSetpointWrite(field);
     if (hold === 'superseded') {
       return;
@@ -2794,7 +2794,7 @@ export class KumoThermostatAccessory {
       this.service.updateCharacteristic(characteristic, temp);
       // Then confirm against the device rather than trusting our own echo.
       this.scheduleSetpointReconcile(field);
-      // Mirror a HomeKit-driven AUTO-handle change to any followers immediately.
+      // Mirror a HomeKit-driven setpoint change to any followers immediately.
       this.notifyStatusListeners();
     } else {
       this.platform.log.error(`[${label}] ${this.accessory.displayName}: Failed to set ${field} to ${temp}`);
@@ -2831,18 +2831,8 @@ export class KumoThermostatAccessory {
   }
 
   /** Collapse a raw source mode to a command mode (autoHeat/autoCool → auto, off if powered off). */
-  private normalizeMirrorMode(desired: MirrorState): 'off' | 'heat' | 'cool' | 'auto' | 'dry' | 'vent' {
-    if (desired.power === 0 || desired.operationMode === 'off') {
-      return 'off';
-    }
-    const m = desired.operationMode;
-    if (this.isAutoMode(m)) {
-      return 'auto';
-    }
-    if (m === 'heat' || m === 'cool' || m === 'dry' || m === 'vent') {
-      return m;
-    }
-    return 'off';
+  private normalizeMirrorMode(desired: MirrorState): 'off' | ActiveMode {
+    return desired.power === 0 ? 'off' : this.toActiveMode(desired.operationMode) ?? 'off';
   }
 
   /**

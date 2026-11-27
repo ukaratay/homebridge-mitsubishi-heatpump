@@ -15,7 +15,7 @@
 // accessory. Before the fix, the publish count was 0.
 //
 // Since the HeaterCooler migration the switches are ALSO config-gated
-// (showDrySwitch / showFanOnlySwitch, both opt-in; exposeVaneSlat, opt-out), so
+// (showDrySwitch / showFanOnlySwitch, both opt-in; exposeVaneSlat, opt-in), so
 // each add/remove branch is now driven by capability AND config. Both gates route
 // through the same setup*/remove* pair, so both must publish.
 
@@ -63,7 +63,6 @@ function makeHarness(kumoConfig: Partial<KumoConfig> = ALL_ON, existingAccessory
     platform as never,
     accessory as never,
     kumoAPI as never,
-    30,
   );
   // Both are created by the constructor, before any profile arrives. Asserted
   // rather than optional-chained: if either stops being built the tests below

@@ -54,7 +54,6 @@ function makeHarness() {
     platform as never,
     accessory as never,
     kumoAPI as never,
-    30,
   );
   // TargetFanState and SwingMode are capability-gated, so a realistic harness has
   // to deliver a profile before either exists.
@@ -193,6 +192,18 @@ test('auto is reported on TargetFanState, not as a speed', async () => {
     'auto is a mode flag');
   assert.notStrictEqual(await handler.getRotationSpeed(), 0,
     'and must NOT render as a zeroed slider, which reads as "off"');
+});
+
+// Reads are matched case-insensitively because some units report capitalised
+// values. The push path already did; the GET handler compared the raw string, so
+// a unit reporting `Auto` was pushed as AUTO and read back as MANUAL.
+test('a unit that reports the capitalised Auto still reads AUTO', async () => {
+  const { handler, fan } = makeHarness();
+  handler.updateFromZone(zone({ fanSpeed: 'Auto' }));
+
+  assert.strictEqual(await handler.getTargetFanState(), Characteristic.TargetFanState.AUTO);
+  assert.strictEqual(fan.chars.get(Characteristic.TargetFanState)?.value,
+    Characteristic.TargetFanState.AUTO, 'the read and the push agree');
 });
 
 test('switching to AUTO sends auto', async () => {
@@ -351,7 +362,6 @@ function makeLinkAwareHarness() {
     platform as never,
     accessory as never,
     kumoAPI as never,
-    30,
   );
   return { handler, accessory, linked, isPrimary: () => primary };
 }
@@ -410,6 +420,29 @@ test('the log says what a burst of fan writes resolved to', async () => {
 
   assert.deepStrictEqual(lines.filter((l) => l.includes('->') && !l.includes('HomeKit sent')),
     ['[FAN] Bedroom: -> "auto"']);
+});
+
+// Resolved fan writes run from a bare setTimeout, where nothing above them catches.
+// A transport that throws instead of returning false must not become an unhandled
+// rejection, which would take the whole Homebridge process down.
+test('a queued fan write that throws is caught and the slider is put back', async () => {
+  const { handler, fan } = makeHarness();
+  handler.updateFromZone(zone({ fanSpeed: 'low' }));
+  handler['kumoAPI'].sendCommand = async () => {
+    throw new Error('socket hang up');
+  };
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown) => unhandled.push(reason);
+  process.on('unhandledRejection', onUnhandled);
+
+  await handler.setRotationSpeed(100);
+  fan.getCharacteristic(Characteristic.RotationSpeed).value = 100;   // HAP stores the write
+  await settle();
+  process.off('unhandledRejection', onUnhandled);
+
+  assert.deepStrictEqual(unhandled, []);
+  assert.strictEqual(fan.getCharacteristic(Characteristic.RotationSpeed).value, 50,
+    'back on the speed the unit is really at');
 });
 
 test('the HeaterCooler is declared the primary service', () => {
