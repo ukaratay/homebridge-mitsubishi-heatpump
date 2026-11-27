@@ -70,11 +70,13 @@ function makeHarness(
   opts: {
     accessory?: FakeAccessory; fanAccessory?: FakeAccessory | null;
     log?: Partial<FakeLog>; profile?: Partial<DeviceProfile> | false;
+    /** Keep the real FAN_HOLD_MS; the harness zeroes it otherwise. */
+    realFanHold?: boolean;
   } = {},
 ) {
   const h = makeAccessoryHarness({
     kumoConfig, accessory: opts.accessory ?? makeAccessory('Bedroom'),
-    fanAccessory: opts.fanAccessory, log: opts.log,
+    fanAccessory: opts.fanAccessory, log: opts.log, realFanHold: opts.realFanHold,
   });
   if (opts.profile !== false) {
     h.applyProfile(opts.profile ?? PROFILE);
@@ -457,6 +459,90 @@ test('on a unit with no auto fan, Off is refused and the speeds still work', asy
   await h.writes.speed80();
   await tick();
   assert.deepStrictEqual(h.sent, [{ fanSpeed: 'powerful' }]);
+});
+
+// ---- the hold ----------------------------------------------------------------
+//
+// Apple Home writes each step of a slider drag as its own request. Seen live
+// 2026-11-27: one drag from the bottom to 80% sent auto, quiet, low, low and
+// powerful within a second. These run on the real FAN_HOLD_MS, which the
+// harness zeroes everywhere else.
+
+const afterHold = () => new Promise((r) => setTimeout(r, 650));
+
+test('a slider drag sends only its last step', async () => {
+  const info: string[] = [];
+  const h = makeHarness({}, { realFanHold: true, log: { info: (m: string) => info.push(m) } });
+  h.handler.updateFromZone(zone({ fanSpeed: 'auto' }));
+
+  // The requests of the drag in the log, each its own tick.
+  for (const names of [['speed0'], ['speed40', 'fanOn'], ['speed60'], ['speed60'], ['speed80']]) {
+    await h.request(names);
+    await tick();
+  }
+  assert.deepStrictEqual(h.sent, [], 'nothing goes out while the drag is still moving');
+  await afterHold();
+
+  assert.deepStrictEqual(h.sent, [{ fanSpeed: 'powerful' }]);
+  assert.deepStrictEqual(h.reads(), { fan: ON, slider: 80 });
+  assert.deepStrictEqual(info.filter((l) => l.includes('->') && !l.includes('HomeKit sent')),
+    ['[FAN] Bedroom: Fixed Fan Speed on -> "powerful"'], 'and only what was sent is logged as resolved');
+});
+
+test('a drag that ends at the bottom sends fan auto once', async () => {
+  const h = makeHarness({}, { realFanHold: true });
+  h.handler.updateFromZone(zone({ fanSpeed: 'low' }));
+
+  for (const names of [['speed80'], ['speed40'], ['speed0', 'fanOff'], ['speed0']]) {
+    await h.request(names);
+    await tick();
+  }
+  await afterHold();
+
+  assert.deepStrictEqual(h.sent, [{ fanSpeed: 'auto' }]);
+  assert.strictEqual(h.reads().fan, OFF);
+});
+
+test('a single tap is sent once the hold has passed, and not before', async () => {
+  const h = makeHarness({}, { realFanHold: true });
+  h.handler.updateFromZone(zone({ fanSpeed: 'low' }));
+
+  await h.writes.fanOff();
+  await settle();
+  assert.deepStrictEqual(h.sent, []);
+  await afterHold();
+  assert.deepStrictEqual(h.sent, [{ fanSpeed: 'auto' }]);
+});
+
+// The held value meets the off unit either before the turn-on has landed (it is
+// stashed and follows the turn-on) or after (it is sent as it is).
+test('the hold does not lose a scene\'s fan speed on a unit it turns on, ON first or mode first', async () => {
+  const viaOn = makeHarness({}, { realFanHold: true });
+  viaOn.handler.updateFromZone(zone({ ...OFF_UNIT, fanSpeed: 'auto' }));
+  await viaOn.request(['climate', 'fanOn', 'speed60']);
+  await new Promise((r) => setTimeout(r, 2300));
+  assert.strictEqual(Object.keys(viaOn.sent[0]).join(), 'operationMode');
+  assert.deepStrictEqual(viaOn.sent.slice(1), [{ fanSpeed: 'low' }]);
+
+  const viaMode = makeHarness({}, { realFanHold: true });
+  viaMode.handler.updateFromZone(zone({ ...OFF_UNIT, fanSpeed: 'auto' }));
+  await Promise.all([
+    hapWrite(viaMode.heaterCooler.getCharacteristic(C.TargetHeaterCoolerState), C.TargetHeaterCoolerState.HEAT),
+    viaMode.request(['fanOn', 'speed60']),
+  ]);
+  await afterHold();
+  assert.deepStrictEqual(viaMode.sent, [{ operationMode: 'heat' }, { fanSpeed: 'low' }]);
+});
+
+test('the hold does not let a fan speed out behind an AC off', async () => {
+  const h = makeHarness({}, { realFanHold: true });
+  h.handler.updateFromZone(zone({ fanSpeed: 'low' }));
+
+  await h.request(['fanOn', 'speed80', 'off']);
+  await afterHold();
+
+  assert.deepStrictEqual(h.sent, [{ operationMode: 'off' }]);
+  assert.strictEqual(h.reads().fan, OFF);
 });
 
 // ---- scenes ------------------------------------------------------------------

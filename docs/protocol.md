@@ -205,6 +205,8 @@ a head with four real speeds, such as an MLZ-KX cassette, cannot have five disti
 `Active` reads on only while the unit is on and `fanSpeed` is a known speed other than
 `auto`. Off, or a written speed of 0, sends `auto`; on sends the request's speed, or the
 speed the slider shows when the request carries none. It never changes the unit's power.
+A resolved fan value is held for 500 ms and only the newest is sent, because Apple Home
+writes each step of a slider drag as its own request.
 It is a separate accessory because Apple Home stores every writable value of a fan that
 shares an accessory with the HeaterCooler in each scene containing the AC, linked or not,
 and shows none of them in its scene editor. There is no `TargetFanState`: Apple Home does

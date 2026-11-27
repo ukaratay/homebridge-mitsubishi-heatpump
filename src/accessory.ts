@@ -191,6 +191,15 @@ export class KumoThermostatAccessory {
   // Turning Fixed Fan Speed on has to pick a speed, so remember the last fixed
   // one the unit was seen at. The slider shows it while the fan is in auto.
   private lastManualFan: FanSpeed = 'quiet';
+  // Apple Home writes each step of a slider drag as its own request. Seen live
+  // 2026-11-27: one drag from the bottom to 80% sent auto, quiet, low, low and
+  // powerful within a second. So the fan value a request resolves to is held for
+  // FAN_HOLD_MS and only the newest is sent, as setpointWriteGen does for a
+  // setpoint drag. The length is chosen, not measured: the log that showed the
+  // drag has one-second timestamps. A cloud command takes longer than this to
+  // land, so the hold is not felt on a tap.
+  private fanWriteGen = 0;
+  private readonly FAN_HOLD_MS = 500;
   // The fan and vane writes of the HAP request in progress; see noteBurst.
   private burst: Burst | null = null;
   // Timestamp (ms) of the most recent HomeKit "off" request. Within
@@ -2216,10 +2225,26 @@ export class KumoThermostatAccessory {
       );
       this.revertSoon();
     } else if (fan) {
-      // What the request resolved to, at info: the handlers only log what each
-      // characteristic was sent, and a drag sends two.
-      this.platform.log.info(`[FAN] ${name}: ${fan.rule} -> "${fan.speed}"`);
-      this.writeFanSpeed(fan.speed).catch((err) => this.queuedWriteFailed('FAN SPEED', err));
+      // Held, so a drag sends its last step only (see fanWriteGen). The hold is
+      // a second bare setTimeout: the same no-throw rule applies inside it.
+      const gen = ++this.fanWriteGen;
+      const send = () => {
+        if (gen !== this.fanWriteGen) {
+          this.platform.log.debug(`[FAN] ${name}: "${fan.speed}" was replaced before it was sent`);
+          return;
+        }
+        // What the request resolved to, at info: the handlers only log what each
+        // characteristic was sent, and a drag sends many.
+        this.platform.log.info(`[FAN] ${name}: ${fan.rule} -> "${fan.speed}"`);
+        this.writeFanSpeed(fan.speed).catch((err) => this.queuedWriteFailed('FAN SPEED', err));
+      };
+      // 0 means no hold, and no second timer either: the tests that are not
+      // about the hold run that way, so a write is out one tick after its request.
+      if (this.FAN_HOLD_MS > 0) {
+        setTimeout(send, this.FAN_HOLD_MS);
+      } else {
+        send();
+      }
     }
     const vane = this.resolveVane(burst.vane);
     if (vane) {

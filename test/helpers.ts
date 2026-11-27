@@ -251,6 +251,12 @@ export interface HarnessOptions {
   localClient?: unknown;
   /** Log methods to use instead of the silent ones, for lines the constructor writes. */
   log?: Partial<FakeLog>;
+  /**
+   * Keep the real FAN_HOLD_MS. By default the harness sets it to 0, which
+   * turns the hold off: a fan write is then out one tick after its request, so
+   * the many tests that are not about the hold neither wait for it nor race it.
+   */
+  realFanHold?: boolean;
 }
 
 /**
@@ -309,6 +315,9 @@ export function makeAccessoryHarness(opts: HarnessOptions = {}) {
     kumoAPI as never,
     (fanAccessory ?? undefined) as never,
   );
+  if (!opts.realFanHold) {
+    (handler as unknown as { FAN_HOLD_MS: number }).FAN_HOLD_MS = 0;
+  }
 
   return {
     handler, accessory, fanAccessory, kumoConfig, sendCommandCalls, sent, published,
