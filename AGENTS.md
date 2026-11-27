@@ -9,12 +9,13 @@ the code that implements them.
 
 One Homebridge dynamic platform (`src/platform.ts`) owns the cloud client
 (`src/kumo-api.ts`), the optional LAN client (`src/local-api.ts`), the mirror controller
-(`src/mirror.ts`) and one accessory per unit (`src/accessory.ts`).
+(`src/mirror.ts`) and one handler per unit (`src/accessory.ts`), which drives that unit's
+two HomeKit accessories.
 
 - Each unit is a **HeaterCooler** (on/off is `Active`, setpoints are the two threshold
-  characteristics, there is no `TargetTemperature`) plus a linked **Fanv2** for speed and
-  fan-auto (Eve), `SwingMode` on the HeaterCooler, a default-on **Fixed Fan Speed** `Switch`
-  (`fan-fixed`) that decides a scene's fan (`accessory.ts:resolveFanBurst`), and opt-in
+  characteristics, there is no `TargetTemperature`) with `SwingMode` on it, a default-on
+  **Fixed Fan Speed** `Fanv2` on a second accessory of its own (Off is fan auto, On holds
+  the slider's speed; why it is separate is at `accessory.ts:setupFanAccessory`), and opt-in
   `Slats` / `HumiditySensor` / Dry / Fan-only services.
 - Setpoint writes are snapped to the 0.5°C step nearest a whole °F by `src/temperature.ts`
   before they reach either transport. The cloud refuses any other step since 2026-10-30.

@@ -198,10 +198,17 @@ One accessory per indoor unit.
 | `SwingMode` | Vane swing, on units that have one. Reads on only while `vaneDir` is `swing`. On sends `swing`; off sends `auto` from any state. A `Slats` tilt in the same request beats off and loses to on |
 | `TemperatureDisplayUnits` | Settable. The Home app ignores it; Eve and others honour it |
 
-**Fanv2** (linked, subtype `airflow`): `Active`, `CurrentFanState`, `RotationSpeed`
-(`minValue` 0, `maxValue` 100, `minStep` 25 — five detents, one per named speed; a head with four real speeds,
-such as an MLZ-KX cassette, cannot have five distinct ones), and
-`TargetFanState` on units whose profile reports an auto fan.
+**Fixed Fan Speed** (a second accessory per unit, UUID from `<serial>:fan`,
+`fixedFanSpeed`, on by default): one `Fanv2` with `Active` and `RotationSpeed`
+(`minValue` 0, `maxValue` 100, `minStep` 20: five positions from 20, one per named speed;
+a head with four real speeds, such as an MLZ-KX cassette, cannot have five distinct ones).
+`Active` reads on only while the unit is on and `fanSpeed` is a known speed other than
+`auto`. Off, or a written speed of 0, sends `auto`; on sends the request's speed, or the
+speed the slider shows when the request carries none. It never changes the unit's power.
+It is a separate accessory because Apple Home stores every writable value of a fan that
+shares an accessory with the HeaterCooler in each scene containing the AC, linked or not,
+and shows none of them in its scene editor. There is no `TargetFanState`: Apple Home does
+not draw it. See `setupFanAccessory` in `src/accessory.ts`.
 
 **Optional, per unit:**
 
@@ -212,7 +219,6 @@ such as an MLZ-KX cassette, cannot have five distinct ones), and
 | `FilterMaintenance` | Created lazily, the first time the unit reports a dirty filter |
 | `Slats` | `exposeVaneSlat`, off by default. Five discrete angles, −90° to 90° in 45° steps |
 | `Switch` ×2 | `showDrySwitch` / `showFanOnlySwitch`, both off by default and both capability-gated |
-| `Switch` (subtype `fan-fixed`) | `fixedFanSpeedSwitch`, **on** by default, on units whose profile reports an auto fan. Named "&lt;unit&gt; Fixed Fan Speed". On only while the unit is on and `fanSpeed` is a known speed other than `auto`. Off sends `auto`; on sends the request's speed, or the speed the slider shows when the request carries none. It exists because Apple Home draws no `TargetFanState` control for this fan yet replays the value a scene captured: a request carrying `TargetFanState` together with a HeaterCooler write sets fan `auto` unless it turns this switch on. See `resolveFanBurst` in `src/accessory.ts` |
 
 A `Thermostat` service left in the accessory cache by a pre-2.0 version is removed on
 first start, with a log line saying so.
