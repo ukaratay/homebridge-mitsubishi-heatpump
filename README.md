@@ -5,8 +5,8 @@
 HomeKit control for Mitsubishi ductless heat pumps (MLZ / MSZ) through the Mitsubishi
 Comfort v3 cloud API, with optional direct LAN control.
 
-Each unit is a **HeaterCooler** with its fan on a linked Fan service: power, mode,
-setpoints, fan speed and vane swing all on one tile.
+Each unit is a **HeaterCooler**: power, mode, setpoints and vane swing on one tile, with a
+separate **Fixed Fan Speed** tile for the fan.
 
 Not affiliated with, endorsed by, or associated with Mitsubishi Electric. **Use at your
 own risk** — this drives real heating and cooling equipment, and the author assumes no
@@ -16,9 +16,10 @@ liability for damage or loss arising from it.
 
 - **One tile per unit.** On/off, Heat / Cool / Auto, and the setpoint for the active
   mode. Auto shows a two-handle band.
-- **Fan speed on the tile** — five speed positions plus fan-auto, on a linked Fan service.
-- **Vane control** — swing on the main tile, discrete tilt angles through an opt-in
-  `Slats` service.
+- **Fan speed on its own tile.** Each unit has a **Fixed Fan Speed** fan tile: off is fan
+  auto, on holds one of five speeds. A scene changes the fan only when it includes the tile.
+- **Vane control** — swing on the main tile, where swing off means vane auto. Discrete
+  tilt angles through an opt-in `Slats` service.
 - **Fahrenheit-anchored setpoints.** Every setpoint is stored as the 0.5°C step nearest
   a whole °F, so the Home app shows back the degree you set.
 - **Wireless sensor support.** Units with a paired sensor report its finer temperature
@@ -55,6 +56,26 @@ npm install && npm run build && npm link
 
 Then add your credentials — see **[Configuration](https://github.com/ukaratay/homebridge-mitsubishi-heatpump/blob/main/docs/configuration.md)** for the
 minimal config and every option.
+
+## Upgrading from 2.x
+
+Two changes affect scenes you already have, and each unit gets one new tile.
+
+- **The fan moved to its own tile.** Each unit gets a fan accessory named
+  `<unit> Fixed Fan Speed`, and the fan slider leaves the unit's own page. The new tiles
+  appear in the bridge's room: move each one to its unit's room in the Home app.
+  `fixedFanSpeed: false` removes them.
+- **Scenes no longer set the fan.** Up to 2.3.1 every scene that contained a unit also
+  stored its fan speed, which Home never showed. Those stored values are dropped on
+  upgrade, so existing scenes and automations leave the fan as it is. To make a scene set
+  the fan, add the unit's Fixed Fan Speed tile to it. See
+  [Fan auto and scenes](#fan-auto-and-scenes).
+- **The slider scale changed.** The five speeds sit at 20 / 40 / 60 / 80 / 100. 2.3.1 used
+  0 / 25 / 50 / 75 / 100.
+- **Oscillate off sets vane auto.** Turning swing off, by hand or from a scene, now sends
+  vane auto. 2.3.1 sent the last fixed angle it had seen since Homebridge started, or auto
+  if it had seen none. There is no option to keep that. If you never pin a vane angle, you
+  will see no change. See [Vane and swing](#vane-and-swing).
 
 ## Migrating from homebridge-mitsubishi-comfort
 
@@ -114,10 +135,11 @@ characteristic, and there is no state for dehumidify or fan-only. So:
   one may be unable to change between heating and cooling, and waits in standby instead.
 - **What the unit is doing is reported honestly:** heating, cooling, or **idle** when the
   unit reports standby or is in fan-only.
-- **Fan speed and fan-auto** are on a linked Fan service — five positions at 0 / 25 / 50 /
-  75 / 100 on the slider, plus Auto on units whose profile has it. A unit with fewer real
-  speeds has fewer distinct airflows than positions: Mitsubishi lists four on the MLZ-KX
-  ceiling cassettes and five on the MSZ-GX wall unit.
+- **Fan speed** is on the unit's **Fixed Fan Speed** tile, a separate fan accessory that is
+  on by default. Off is fan auto. On holds the slider's speed, with five positions at
+  20 / 40 / 60 / 80 / 100. A unit with fewer real speeds has fewer distinct airflows than
+  positions: Mitsubishi lists four on the MLZ-KX ceiling cassettes and five on the MSZ-GX
+  wall unit. See [Fan auto and scenes](#fan-auto-and-scenes).
 - **Dry** and **Fan-only** are opt-in switches (`showDrySwitch`, `showFanOnlySwitch`),
   added only on units that support them, and mutually exclusive. Dry reports as Cool,
   because HomeKit has no Dry state. Mitsubishi's manuals for the units checked say the
@@ -132,11 +154,75 @@ characteristic, and there is no state for dehumidify or fan-only. So:
 > range, doesn't appear in the Home app, restart your iPhone or iPad. Restarting the Home
 > hub or force-quitting the Home app has not been enough.
 
+### Fan auto and scenes
+
+**A scene changes a unit's fan only if it includes that unit's Fixed Fan Speed tile.**
+
+Each unit has a fan tile named `<unit> Fixed Fan Speed`:
+
+- **Off is fan auto.** A heat pump's fan cannot be off while the unit runs, so off means
+  the unit picks the speed.
+- **On holds the speed on the slider.** Dragging the slider up turns it on at that speed.
+  Dragging it to the bottom turns it off.
+- **It reads off while the unit is off**, whatever the unit has stored. Off says nothing
+  about the fan then.
+- **It never turns the unit on.** Turning it on while the unit is off sends nothing and
+  the tile goes back to off. The speed is applied only if the unit is turned on within a
+  few seconds, which is what a scene that sets both does.
+- **On a unit without an auto fan**, the tile is on whenever the unit runs, and turning it
+  off is refused.
+
+In a scene or automation:
+
+| The scene contains | Result when it runs |
+|---|---|
+| Only the unit | The fan stays as it is |
+| The fan tile, off | Fan auto |
+| The fan tile, on at a speed | That speed |
+
+The fan is a separate accessory because of how Apple Home builds scenes. Home stores every
+value of a fan that shares an accessory with the unit in each scene containing that unit,
+and its scene editor shows only temperature and mode. Up to 2.3.1, a scene saved while a
+fan was at a fixed speed put it back at that speed every time it ran, and nothing in Home
+showed it. On its own tile the fan is in a scene only when you add it, and the editor
+shows its speed.
+
+What this costs:
+
+- **One more tile per unit.** Hide it from the Home view in its settings if you only want
+  it in scenes.
+- **Nothing in Home says Auto.** Read "Fixed Fan Speed: off" on a running unit as fan auto.
+- **The slider does not show the real speed in auto.** The unit reports no speed in auto,
+  so the slider keeps the last fixed speed, and turning the tile on goes back to it.
+- **"Turn off the fans" sets fan auto** on every unit in range of the command, and "turn
+  on the fans" holds each running unit at its last fixed speed. Neither changes a unit's
+  power.
+
+To opt out, set `fixedFanSpeed` to `false`. The tiles go, and HomeKit has no fan control:
+the fan stays as the remote or the Mitsubishi app set it.
+
 ### Vane and swing
 
 Swing on/off lives on the main tile via `SwingMode`. Apple Home does not render an
 Oscillate toggle for a collapsed accessory's fan service, which is why swing is on the
 climate service and not the fan.
+
+**Oscillate off means vane auto.** On sends swing. Off sends the vane's **auto** position
+(a fixed position the unit chooses by mode: horizontal in cool and dry, downward in heat,
+per Mitsubishi's operating manuals), whatever the vane was doing, whether you tap it, ask
+Siri, or a scene replays it. HomeKit has no other control that can carry vane auto.
+
+What this costs:
+
+- **Oscillate reads off for auto and for every fixed angle alike.**
+- **An angle set with the remote or the Mitsubishi app does not survive a scene.** The next
+  scene that includes the unit sets the vane to auto, or to the scene's own tilt angle
+  when Slats is on.
+- **A fixed angle from Home needs the opt-in Slats control** (`exposeVaneSlat`, below).
+  When a request carries both, a tilt angle beats Oscillate off, and Oscillate on beats a
+  tilt angle.
+- **A unit with fixed angles but no swing has no Oscillate**, so Home cannot set its vane
+  to auto.
 
 Discrete tilt angles need `exposeVaneSlat`, which is **off by default**. Apple Home
 categorises a HAP `Slats` service as a **window covering**: turned on, each unit's vane
@@ -207,6 +293,17 @@ the cloud keeps serving that state from a frozen record and it may be hours old.
 
 In the Homebridge log, look for `[REACHABILITY] <unit>: unreachable` and
 `[REACHABILITY] <unit>: back online`, and for `reported offline (reason: ...)`.
+
+### The fan changes when a scene runs
+
+A scene changes a unit's fan only if it includes that unit's Fixed Fan Speed tile: on
+holds the speed stored in the scene, off sets fan auto. Open the scene and check that
+tile. See [Fan auto and scenes](#fan-auto-and-scenes).
+
+In the log, `[FAN] <unit>: Fixed Fan Speed on -> "<speed>"` and
+`[FAN] <unit>: Fixed Fan Speed off -> "auto"` are the fan setting each request resolved
+to. A line saying the speed `is held for a turn-on` means the unit was off and nothing
+was sent.
 
 ### A unit shows "0% Humidity"
 
